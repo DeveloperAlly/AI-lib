@@ -6,6 +6,10 @@ import { safeRepoPath, toMarkdownDoc, parseMarkdownDoc } from '../src/github.js'
 import { sniffImage, isBlockedAddress, decodeBase64Image, fetchImage } from '../src/media.js';
 import { docToInput } from '../src/sync.js';
 import { makePng } from './helpers.js';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { OwnerOAuthProvider } from '../src/auth.js';
 
 const media = { maxBytes: 1024 * 1024, allowPrivateHosts: false };
 
@@ -82,4 +86,26 @@ test('SSRF guard blocks private, loopback and metadata addresses', async () => {
   await assert.rejects(fetchImage('http://example.com/a.png', media), /Only https/);
   await assert.rejects(fetchImage('https://127.0.0.1/a.png', media), /private or reserved/);
   await assert.rejects(fetchImage('https://localhost/a.png', media), /private or reserved/);
+});
+
+test('JavaScript front matter is refused, never evaluated', () => {
+  (globalThis as any).__pwned = 0;
+  assert.throws(() => parseMarkdownDoc('---js\n{ title: "x", p: (globalThis.__pwned = 42) }\n---\nbody'), /not allowed/);
+  assert.equal((globalThis as any).__pwned, 0);
+});
+
+test('rotating TOKEN_SECRET invalidates existing refresh tokens', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gp-unit-'));
+  const cfg = (secret: string) => ({ publicUrl: new URL('http://localhost:1'), port: 1, ownerPassphrase: 'p'.repeat(16), tokenSecret: secret, dataDir: dir, allowedRedirectHosts: ['localhost'], accessTokenTtlSec: 60, refreshTokenTtlSec: 600 });
+  const res = new URL('http://localhost:1/mcp');
+  const a = new OwnerOAuthProvider(cfg('a'.repeat(40)), res);
+  await a.init();
+  const client = await a.clientsStore.registerClient!({ redirect_uris: ['http://localhost:9/cb'], token_endpoint_auth_method: 'none' } as any);
+  const t = await (a as any).issue(client.client_id, ['ghost:write'], res.href);
+  assert.ok((await a.exchangeRefreshToken(client, t.refresh_token)).access_token, 'works with the same secret');
+  const t2 = await (a as any).issue(client.client_id, ['ghost:write'], res.href);
+  const b = new OwnerOAuthProvider(cfg('b'.repeat(40)), res);
+  await b.init();
+  await assert.rejects(b.exchangeRefreshToken(client, t2.refresh_token), /Invalid or expired/);
+  await assert.rejects(b.verifyAccessToken(t2.access_token), /Invalid access token/);
 });

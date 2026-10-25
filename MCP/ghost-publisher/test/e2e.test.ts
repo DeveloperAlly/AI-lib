@@ -151,15 +151,39 @@ test('owner login: wrong passphrase and tampering rejected; correct passphrase +
   assert.equal(r1.status, 200);
   const j1 = await r1.json();
   assert.equal((await tok({ grant_type: 'refresh_token', refresh_token: refreshToken })).status, 400, 'old refresh token is dead after rotation');
-  accessToken = j1.access_token; refreshToken = j1.refresh_token;
+  // Reuse of a rotated token is treated as theft: the whole family, including the newest token, is revoked.
+  assert.equal((await tok({ grant_type: 'refresh_token', refresh_token: j1.refresh_token })).status, 400, 'family revoked after reuse');
+  accessToken = j1.access_token;
+
+  // The page's CSP must allow the post-login redirect (Chrome/Safari apply form-action to redirects).
+  const csp = page.headers.get('content-security-policy')!;
+  assert.match(csp, /form-action 'self' http:\/\/localhost:33418/);
+  assert.match(csp, /frame-ancestors 'none'/);
+  const wrong = await post({ req: reqBlob, sig, passphrase: 'wrong-again', decision: 'allow' });
+  assert.equal(wrong.headers.get('x-frame-options'), 'DENY', 'failed-login page is not frameable');
 
   const deny = await post({ req: reqBlob, sig, decision: 'deny' });
   assert.equal(new URL(deny.headers.get('location')!).searchParams.get('error'), 'access_denied');
 });
 
+test('malformed login bodies get 400 and do not crash the server', async () => {
+  for (const body of ['req=a&sig=b&sig=c', 'req=a&sig=b&passphrase=x&passphrase=y', 'req[x]=1']) {
+    const r = await fetch(`${base}/login`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
+    assert.equal(r.status, 400, body);
+  }
+  assert.equal((await fetch(`${base}/health`)).status, 200, 'server still alive');
+});
+
+test('claude.ai redirect URIs must be the exact callback path', async () => {
+  const reg = (u: string) => fetch(`${base}/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [u], token_endpoint_auth_method: 'none' }) }).then((r) => r.status);
+  assert.equal(await reg('https://claude.ai/evil/path'), 400);
+  assert.equal(await reg('vscode://localhost/cb'), 400);
+  assert.equal(await reg('https://claude.ai/api/mcp/auth_callback'), 201);
+});
+
 test('forged or garbage bearer tokens are rejected', async () => {
   const [body] = accessToken.split('.');
-  for (const t of ['garbage', `${body}.AAAA`]) {
+  for (const t of ['garbage', `${body}.AAAA`, 'bm90LWpzb24.AAAA']) {
     const r = await fetch(`${base}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${t}`, accept: 'application/json, text/event-stream' }, body: '{}' });
     assert.equal(r.status, 401);
   }

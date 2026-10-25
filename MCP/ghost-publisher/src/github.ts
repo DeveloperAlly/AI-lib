@@ -119,7 +119,17 @@ export function toMarkdownDoc(m: MirrorInput): string {
   return matter.stringify(`\n${m.body.trim()}\n`, fm);
 }
 
+// gray-matter evals `---js` front matter by default; repo content must never run
+// code on the server. Passing options also disables gray-matter's unbounded cache.
+const MATTER_OPTS = {
+  engines: {
+    javascript: () => {
+      throw new Error('JavaScript front matter is not allowed');
+    },
+  },
+};
+
 export function parseMarkdownDoc(text: string): { data: Record<string, unknown>; body: string } {
-  const parsed = matter(text);
+  const parsed = matter(text, MATTER_OPTS as never);
   return { data: parsed.data as Record<string, unknown>, body: parsed.content };
 }

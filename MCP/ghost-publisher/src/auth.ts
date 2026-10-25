@@ -15,33 +15,39 @@ import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/serv
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { OAuthClientInformationFull, OAuthTokens, OAuthTokenRevocationRequest } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { InvalidClientMetadataError, InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import { redirectUriMatches } from '@modelcontextprotocol/sdk/server/auth/handlers/authorize.js';
 import type { ServerConfig } from './config.js';
 
 export const SCOPE = 'ghost:write';
 
 const b64url = (b: Buffer | string) => Buffer.from(b).toString('base64url');
 const sha256 = (s: string) => createHash('sha256').update(s).digest();
-const hashToken = (t: string) => sha256(t).toString('hex');
 
-function safeEqual(a: string, b: string): boolean {
+function safeEqual(a: unknown, b: string): boolean {
+  if (typeof a !== 'string') return false;
   return timingSafeEqual(sha256(a), sha256(b));
 }
+
+/** Claude's hosted OAuth callback (claude.ai, and claude.com per Anthropic's note that it may move). */
+const CLAUDE_CALLBACK_PATH = '/api/mcp/auth_callback';
 
 // ---------- persistent state (clients + refresh tokens) ----------
 
 interface RefreshRecord {
   clientId: string;
+  family: string;
   scopes: string[];
   resource?: string;
   expiresAt: number;
 }
 interface State {
   clients: Record<string, OAuthClientInformationFull>;
-  refresh: Record<string, RefreshRecord>; // keyed by sha256(token)
+  refresh: Record<string, RefreshRecord>; // keyed by HMAC(tokenSecret, token)
+  rotated: Record<string, { family: string; expiresAt: number }>; // used refresh tokens, for reuse detection
 }
 
 class StateStore {
-  private state: State = { clients: {}, refresh: {} };
+  private state: State = { clients: {}, refresh: {}, rotated: {} };
   private file: string;
   private writing: Promise<void> = Promise.resolve();
   constructor(dir: string) {
@@ -51,9 +57,12 @@ class StateStore {
     await mkdir(join(this.file, '..'), { recursive: true });
     try {
       this.state = JSON.parse(await readFile(this.file, 'utf8')) as State;
+      this.state.rotated ??= {};
     } catch {
-      this.state = { clients: {}, refresh: {} };
+      this.state = { clients: {}, refresh: {}, rotated: {} };
     }
+    // Fail at startup, not on the first login, if the data dir is not writable.
+    await this.save();
     this.prune();
   }
   get data(): State {
@@ -61,7 +70,8 @@ class StateStore {
   }
   prune(): void {
     const now = Date.now() / 1000;
-    for (const [k, r] of Object.entries(this.state.refresh)) if (r.expiresAt < now) delete this.state.refresh[k];
+    for (const [k, r] of Object.entries(this.state.refresh)) if (r.expiresAt < now || !r.family) delete this.state.refresh[k];
+    for (const [k, r] of Object.entries(this.state.rotated)) if (r.expiresAt < now) delete this.state.rotated[k];
     // Keep the client list bounded: DCR registers a fresh client per connection.
     const ids = Object.keys(this.state.clients);
     if (ids.length > 200) {
@@ -73,7 +83,8 @@ class StateStore {
   save(): Promise<void> {
     this.prune();
     const snapshot = JSON.stringify(this.state);
-    this.writing = this.writing.then(async () => {
+    // catch first: one failed write must not poison every later save
+    this.writing = this.writing.catch(() => {}).then(async () => {
       const tmp = `${this.file}.${process.pid}.tmp`;
       await writeFile(tmp, snapshot, { mode: 0o600 });
       await rename(tmp, this.file);
@@ -97,6 +108,7 @@ export class OwnerOAuthProvider implements OAuthServerProvider {
   private codes = new Map<string, PendingCode>();
   private store: StateStore;
   private loginAttempts = new Map<string, { count: number; reset: number }>();
+  private globalFails = { count: 0, reset: 0 };
 
   constructor(private cfg: ServerConfig, private resourceUrl: URL) {
     this.store = new StateStore(cfg.dataDir);
@@ -120,7 +132,10 @@ export class OwnerOAuthProvider implements OAuthServerProvider {
           const host = u.hostname.toLowerCase();
           const loopback = host === 'localhost' || host === '127.0.0.1';
           if (!this.cfg.allowedRedirectHosts.includes(host)) throw new InvalidClientMetadataError(`redirect_uri host ${host} is not allowed`);
-          if (u.protocol !== 'https:' && !loopback) throw new InvalidClientMetadataError('redirect_uri must be https');
+          if (loopback ? u.protocol !== 'http:' && u.protocol !== 'https:' : u.protocol !== 'https:')
+            throw new InvalidClientMetadataError('redirect_uri must be https (or http for loopback)');
+          if ((host === 'claude.ai' || host === 'claude.com') && u.pathname !== CLAUDE_CALLBACK_PATH)
+            throw new InvalidClientMetadataError(`redirect_uri on ${host} must be ${CLAUDE_CALLBACK_PATH}`);
         }
         const full = {
           ...client,
@@ -148,7 +163,7 @@ export class OwnerOAuthProvider implements OAuthServerProvider {
     };
     const blob = b64url(JSON.stringify(payload));
     const sig = this.sign(`login:${blob}`);
-    res.status(200).type('html').set({ 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'" })
+    res.status(200).type('html').set(pageHeaders(params.redirectUri))
       .send(loginPage({ clientName: client.client_name || 'MCP client', redirectHost: new URL(params.redirectUri).host, blob, sig }));
   }
 
@@ -157,22 +172,36 @@ export class OwnerOAuthProvider implements OAuthServerProvider {
     const ip = req.ip || 'unknown';
     const now = Date.now();
     const a = this.loginAttempts.get(ip);
-    if (a && a.reset > now && a.count >= 5) {
+    // Per-IP limit plus a global one, so a spoofed or rotating client IP cannot
+    // brute-force the passphrase either.
+    if ((a && a.reset > now && a.count >= 5) || (this.globalFails.reset > now && this.globalFails.count >= 20)) {
       res.status(429).type('text').send('Too many attempts. Try again in 15 minutes.');
       return;
     }
-    const { req: blob = '', sig = '', passphrase = '', decision = '' } = (req.body ?? {}) as Record<string, string>;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const field = (k: string) => (typeof body[k] === 'string' ? (body[k] as string) : body[k] === undefined ? '' : null);
+    const blob = field('req'), sig = field('sig'), passphrase = field('passphrase'), decision = field('decision');
+    if (blob === null || sig === null || passphrase === null || decision === null) {
+      res.status(400).type('text').send('Malformed login request.');
+      return;
+    }
     if (!blob || !sig || !safeEqual(sig, this.sign(`login:${blob}`))) {
       res.status(400).type('text').send('Invalid or tampered login request. Start again from Claude.');
       return;
     }
-    const p = JSON.parse(Buffer.from(blob, 'base64url').toString('utf8')) as { c: string; r: string; ch: string; s: string; sc: string[]; rs: string; e: number };
+    let p: { c: string; r: string; ch: string; s: string; sc: string[]; rs: string; e: number };
+    try {
+      p = JSON.parse(Buffer.from(blob, 'base64url').toString('utf8'));
+    } catch {
+      res.status(400).type('text').send('Malformed login request.');
+      return;
+    }
     if (p.e < now / 1000) {
       res.status(400).type('text').send('This login link expired. Start again from Claude.');
       return;
     }
     const client = this.store.data.clients[p.c];
-    if (!client || !client.redirect_uris.includes(p.r)) {
+    if (!client || !client.redirect_uris.some((u) => redirectUriMatches(p.r, u))) {
       res.status(400).type('text').send('Unknown client. Start again from Claude.');
       return;
     }
@@ -187,7 +216,9 @@ export class OwnerOAuthProvider implements OAuthServerProvider {
       const cur = a && a.reset > now ? a : { count: 0, reset: now + 15 * 60_000 };
       cur.count += 1;
       this.loginAttempts.set(ip, cur);
-      res.status(401).type('html').send(loginPage({ clientName: client.client_name || 'MCP client', redirectHost: back.host, blob, sig, error: 'Incorrect passphrase.' }));
+      if (this.globalFails.reset <= now) this.globalFails = { count: 0, reset: now + 15 * 60_000 };
+      this.globalFails.count += 1;
+      res.status(401).type('html').set(pageHeaders(p.r)).send(loginPage({ clientName: client.client_name || 'MCP client', redirectHost: back.host, blob, sig, error: 'Incorrect passphrase.' }));
       return;
     }
     this.loginAttempts.delete(ip);
@@ -213,18 +244,31 @@ export class OwnerOAuthProvider implements OAuthServerProvider {
   }
 
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[]): Promise<OAuthTokens> {
-    const key = hashToken(refreshToken);
+    const key = this.hashToken(refreshToken);
+    const reused = this.store.data.rotated[key];
+    if (reused) {
+      // A rotated token came back: someone else holds the chain. Kill the whole family.
+      for (const [k, rec] of Object.entries(this.store.data.refresh)) if (rec.family === reused.family) delete this.store.data.refresh[k];
+      await this.store.save();
+      throw new InvalidGrantError('Refresh token reuse detected; sign in again');
+    }
     const r = this.store.data.refresh[key];
     if (!r || r.clientId !== client.client_id || r.expiresAt < Date.now() / 1000) throw new InvalidGrantError('Invalid or expired refresh token');
     delete this.store.data.refresh[key]; // rotate: old refresh token is now dead
+    this.store.data.rotated[key] = { family: r.family, expiresAt: r.expiresAt };
     const granted = scopes?.length ? scopes.filter((s) => r.scopes.includes(s)) : r.scopes;
-    return this.issue(client.client_id, granted, r.resource);
+    return this.issue(client.client_id, granted, r.resource, r.family);
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const [body, sig] = token.split('.');
     if (!body || !sig || !safeEqual(sig, this.sign(`at:${body}`))) throw new InvalidTokenError('Invalid access token');
-    const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as { cid: string; sc: string[]; exp: number; aud?: string };
+    let p: { cid: string; sc: string[]; exp: number; aud?: string };
+    try {
+      p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    } catch {
+      throw new InvalidTokenError('Invalid access token');
+    }
     if (p.exp < Date.now() / 1000) throw new InvalidTokenError('Access token expired');
     if (!this.store.data.clients[p.cid]) throw new InvalidTokenError('Client no longer registered');
     if (p.aud && p.aud !== this.resourceUrl.href) throw new InvalidTokenError('Token was issued for a different resource');
@@ -232,21 +276,26 @@ export class OwnerOAuthProvider implements OAuthServerProvider {
   }
 
   async revokeToken(client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
-    const key = hashToken(request.token);
+    const key = this.hashToken(request.token);
     if (this.store.data.refresh[key]?.clientId === client.client_id) {
       delete this.store.data.refresh[key];
       await this.store.save();
     }
   }
 
-  private async issue(clientId: string, scopes: string[], resource?: string): Promise<OAuthTokens> {
+  private async issue(clientId: string, scopes: string[], resource?: string, family = randomBytes(8).toString('hex')): Promise<OAuthTokens> {
     const exp = Math.floor(Date.now() / 1000) + this.cfg.accessTokenTtlSec;
     const body = b64url(JSON.stringify({ cid: clientId, sc: scopes, exp, aud: resource, n: randomBytes(8).toString('hex') }));
     const access = `${body}.${this.sign(`at:${body}`)}`;
     const refresh = randomBytes(32).toString('base64url');
-    this.store.data.refresh[hashToken(refresh)] = { clientId, scopes, resource, expiresAt: Math.floor(Date.now() / 1000) + this.cfg.refreshTokenTtlSec };
+    this.store.data.refresh[this.hashToken(refresh)] = { clientId, family, scopes, resource, expiresAt: Math.floor(Date.now() / 1000) + this.cfg.refreshTokenTtlSec };
     await this.store.save();
     return { access_token: access, token_type: 'Bearer', expires_in: this.cfg.accessTokenTtlSec, refresh_token: refresh, scope: scopes.join(' ') };
+  }
+
+  /** Keyed with TOKEN_SECRET, so rotating the secret invalidates every refresh token. */
+  private hashToken(t: string): string {
+    return createHmac('sha256', this.cfg.tokenSecret).update(`rt:${t}`).digest('hex');
   }
 
   private sign(s: string): string {
@@ -255,6 +304,22 @@ export class OwnerOAuthProvider implements OAuthServerProvider {
 }
 
 // ---------- login page ----------
+
+/** Headers for the login page. form-action must include the redirect origin:
+ *  Chrome and Safari apply form-action to the 302 that follows the form POST. */
+function pageHeaders(redirectUri: string): Record<string, string> {
+  let origin = '';
+  try {
+    origin = new URL(redirectUri).origin;
+  } catch {
+    /* validated upstream */
+  }
+  return {
+    'Cache-Control': 'no-store',
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${origin}; frame-ancestors 'none'; base-uri 'none'`,
+  };
+}
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 

@@ -41,7 +41,8 @@ export function docToInput(data: Record<string, unknown>, body: string, file: st
 }
 
 async function syncFile(file: string, ghost: Ghost, root: string, allowPublish: boolean): Promise<Outcome> {
-  const abs = resolve(file);
+  const abs = await realpath(resolve(file));
+  if (!abs.startsWith(root + sep)) throw new Error(`${file} resolves outside the repository`);
   const text = await readFile(abs, 'utf8');
   const { data, body } = parseMarkdownDoc(text);
   const input = docToInput(data, body, abs);

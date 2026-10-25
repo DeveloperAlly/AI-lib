@@ -47,8 +47,8 @@ export async function createApp() {
     }),
   );
 
-  app.post('/login', rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false }), express.urlencoded({ extended: false, limit: '16kb' }), (req, res) => {
-    void provider.handleLogin(req, res);
+  app.post('/login', rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false }), express.urlencoded({ extended: false, limit: '16kb' }), (req, res, next) => {
+    provider.handleLogin(req, res).catch(next);
   });
 
   const auth = requireBearerAuth({
