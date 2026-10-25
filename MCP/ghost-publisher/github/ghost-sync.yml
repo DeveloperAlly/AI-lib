@@ -1,0 +1,84 @@
+# Push-to-draft: copy this file to .github/workflows/ghost-sync.yml in your
+# CONTENT repo (the one set as GITHUB_REPO on the MCP server).
+#
+# On every push that changes posts/**/*.md it creates or updates the matching
+# Ghost DRAFT, uploads images (relative paths or URLs), and commits ghost_id /
+# ghost_revision back into the file with [skip ci].
+#
+# Repo settings needed:
+#   Secrets:   GHOST_URL            e.g. https://blog.alisonhaire.com
+#              GHOST_ADMIN_API_KEY  Admin API key of a Ghost custom integration
+#   Variable:  ALLOW_GIT_PUBLISH    optional; "true" lets `status: published` in a
+#                                   file publish the post. Default: drafts only.
+#
+# The server's own mirror commits carry [skip ci], so they never trigger this.
+
+name: Ghost sync
+
+on:
+  push:
+    branches: [main]
+    paths: ['posts/**.md']
+  workflow_dispatch:
+
+concurrency:
+  group: ghost-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v6
+        with:
+          repository: DeveloperAlly/AI-lib
+          path: .ghost-publisher
+          sparse-checkout: MCP/ghost-publisher
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Build sync tool
+        working-directory: .ghost-publisher/MCP/ghost-publisher
+        run: npm ci && npm run build
+
+      - name: Find changed posts
+        id: changed
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            git ls-files 'posts/*.md' 'posts/**/*.md' > changed.txt
+          else
+            git diff --name-only --diff-filter=AM "$BEFORE" "$GITHUB_SHA" -- 'posts/*.md' 'posts/**/*.md' > changed.txt
+          fi
+          echo "count=$(wc -l < changed.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          cat changed.txt
+
+      - name: Sync to Ghost
+        if: steps.changed.outputs.count != '0'
+        env:
+          GHOST_URL: ${{ secrets.GHOST_URL }}
+          GHOST_ADMIN_API_KEY: ${{ secrets.GHOST_ADMIN_API_KEY }}
+          ALLOW_GIT_PUBLISH: ${{ vars.ALLOW_GIT_PUBLISH }}
+        run: |
+          set -o pipefail
+          tr '\n' '\0' < changed.txt | xargs -0 node .ghost-publisher/MCP/ghost-publisher/dist/sync.js
+
+      - name: Record Ghost ids in the repo
+        if: always() && steps.changed.outputs.count != '0'
+        run: |
+          git config user.name "ghost-sync[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add posts
+          if git diff --cached --quiet; then echo "Nothing to record."; exit 0; fi
+          git commit -m "ghost-sync: record Ghost ids and image URLs [skip ci]"
+          git push

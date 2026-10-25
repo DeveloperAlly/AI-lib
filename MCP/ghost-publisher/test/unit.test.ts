@@ -1,0 +1,85 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { markdownToHtml, mergeHead, faqJsonLd, rewriteMarkdownImages } from '../src/content.js';
+import { auditPost } from '../src/seo.js';
+import { safeRepoPath, toMarkdownDoc, parseMarkdownDoc } from '../src/github.js';
+import { sniffImage, isBlockedAddress, decodeBase64Image, fetchImage } from '../src/media.js';
+import { docToInput } from '../src/sync.js';
+import { makePng } from './helpers.js';
+
+const media = { maxBytes: 1024 * 1024, allowPrivateHosts: false };
+
+test('markdown: fenced code keeps its language; lone image becomes a figure with alt and caption', () => {
+  const html = markdownToHtml('## Setup\n\n```ts\nconst x: number = 1;\n```\n\n![A diagram](https://e.com/a.png "The caption")\n');
+  assert.match(html, /<pre><code class="language-ts">const x: number = 1;/);
+  assert.match(html, /<figure><img src="https:\/\/e.com\/a.png" alt="A diagram"><figcaption>The caption<\/figcaption><\/figure>/);
+  assert.doesNotMatch(html, /<p><figure>/);
+});
+
+test('FAQ JSON-LD escapes < so answers cannot break out of the script tag', () => {
+  const ld = faqJsonLd([{ question: 'Q?', answer: 'evil </script><script>alert(1)</script>' }]);
+  assert.equal((ld.match(/<\/script>/g) ?? []).length, 1);
+  assert.match(ld, /"@type":"FAQPage"/);
+});
+
+test('mergeHead replaces only the managed block and keeps other code injection', () => {
+  const first = mergeHead('<meta name="x" content="keep">', [{ question: 'One?', answer: 'A' }]);
+  const second = mergeHead(first, [{ question: 'Two?', answer: 'B' }]);
+  assert.match(second, /keep/);
+  assert.match(second, /Two\?/);
+  assert.doesNotMatch(second, /One\?/);
+  assert.equal(mergeHead(second, []), '<meta name="x" content="keep">');
+});
+
+test('rewriteMarkdownImages points refs at uploaded copies', () => {
+  const md = rewriteMarkdownImages('![a](./img/a.png) ![b](https://x/b.png "t")', new Map([['./img/a.png', 'https://g/content/images/a.png'], ['https://x/b.png', 'https://g/content/images/b.png']]));
+  assert.equal(md, '![a](https://g/content/images/a.png) ![b](https://g/content/images/b.png "t")');
+});
+
+test('SEO audit flags the important problems and passes a good post', () => {
+  const bad = auditPost({ title: 'x', html: '<h1>Big</h1><h4>skip</h4><p>short</p><img src="a.png">', feature_image: 'f.png' });
+  const codes = bad.map((f) => f.code);
+  for (const c of ['BODY_H1', 'HEADING_SKIP', 'IMAGE_ALT_MISSING', 'FEATURE_IMAGE_ALT_MISSING', 'META_DESCRIPTION_MISSING', 'BODY_THIN'])
+    assert.ok(codes.includes(c), `expected ${c}`);
+  const body = `<p>${'Direct answer words here. '.repeat(8)}</p><h2>What is it?</h2><p>${'word '.repeat(400)}<a href="https://src">source</a></p><pre><code class="language-js">x</code></pre><figure><img src="i.png" alt="ok"></figure>`;
+  const good = auditPost({ title: 'A good descriptive title for testing', slug: 'good-post', html: body, custom_excerpt: 'e', meta_description: 'd'.repeat(120), feature_image: 'f.png', feature_image_alt: 'alt', tags: [{}] });
+  assert.deepEqual(good.filter((f) => f.severity !== 'info'), []);
+});
+
+test('repo paths cannot escape the repo root', () => {
+  assert.equal(safeRepoPath('posts/./a/../b.md'), 'posts/b.md');
+  assert.throws(() => safeRepoPath('../secrets'));
+  assert.throws(() => safeRepoPath('posts/../../etc/passwd'));
+});
+
+test('front matter round-trips through the sync input mapping', () => {
+  const doc = toMarkdownDoc({
+    post: { id: 'abc', uuid: 'u', title: 'Hello: world', slug: 'hello', status: 'draft', url: 'u', updated_at: '2026-10-25T21:42:51.000Z', published_at: null, meta_description: 'desc', feature_image: 'https://g/i.png', tags: [] },
+    body: '## Hi\n\nBody', format: 'markdown', tags: ['AI'], faq: [{ question: 'Q?', answer: 'A' }],
+  });
+  const { data, body } = parseMarkdownDoc(doc);
+  assert.equal(data.ghost_id, 'abc');
+  const input = docToInput(data, body, '/x/posts/hello.md');
+  assert.equal(input.title, 'Hello: world');
+  assert.equal(input.slug, 'hello');
+  assert.equal(input.meta_description, 'desc');
+  assert.deepEqual(input.tags, ['AI']);
+  assert.match(input.markdown!, /## Hi/);
+  assert.equal(input.faq?.[0].question, 'Q?');
+});
+
+test('image sniffing accepts real rasters and rejects SVG and junk', () => {
+  assert.equal(sniffImage(makePng())?.ext, 'png');
+  assert.equal(sniffImage(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>')), null);
+  assert.throws(() => decodeBase64Image(Buffer.from('<svg/>').toString('base64'), media));
+  assert.equal(decodeBase64Image(`data:image/png;base64,${makePng().toString('base64')}`, media).kind.ext, 'png');
+});
+
+test('SSRF guard blocks private, loopback and metadata addresses', async () => {
+  for (const a of ['127.0.0.1', '10.1.2.3', '192.168.0.1', '169.254.169.254', '100.64.0.1', '::1', 'fd00::1', '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:a9fe:a9fe'])
+    assert.ok(isBlockedAddress(a), a);
+  for (const a of ['93.184.216.34', '8.8.8.8', '2606:4700::1111', '::ffff:8.8.8.8']) assert.ok(!isBlockedAddress(a), a);
+  await assert.rejects(fetchImage('http://example.com/a.png', media), /Only https/);
+  await assert.rejects(fetchImage('https://127.0.0.1/a.png', media), /private or reserved/);
+  await assert.rejects(fetchImage('https://localhost/a.png', media), /private or reserved/);
+});
