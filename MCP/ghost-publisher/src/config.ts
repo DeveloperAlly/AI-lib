@@ -82,8 +82,9 @@ export function loadServerConfig(): ServerConfig {
   if (publicUrl.protocol !== 'https:' && !local) throw new Error('PUBLIC_URL must be https');
   const ownerPassphrase = req('OWNER_PASSPHRASE');
   if (ownerPassphrase.length < 16) throw new Error('OWNER_PASSPHRASE must be at least 16 characters');
-  const tokenSecret = req('TOKEN_SECRET');
-  if (tokenSecret.length < 32) throw new Error('TOKEN_SECRET must be at least 32 characters (use: openssl rand -hex 32)');
+  // Optional: if unset, the server generates one on first start and keeps it in DATA_DIR.
+  const tokenSecret = process.env.TOKEN_SECRET?.trim() ?? '';
+  if (tokenSecret && tokenSecret.length < 32) throw new Error('TOKEN_SECRET must be at least 32 characters (or leave it unset to auto-generate)');
   return {
     publicUrl,
     port: Number(opt('PORT', '8080')),

@@ -61,7 +61,7 @@ In the same Sliplane project as Ghost, **Deploy Service**:
 | `GHOST_URL` | `https://blog.alisonhaire.com` |
 | `GHOST_ADMIN_API_KEY` | *secret*: key from step 1 |
 | `OWNER_PASSPHRASE` | *secret*: 16+ characters; you type this once when connecting Claude |
-| `TOKEN_SECRET` | *secret*: `openssl rand -hex 32` (changing it signs everyone out) |
+| `TOKEN_SECRET` | optional. Leave unset: the server generates one on first start and keeps it on the `/data` volume. Deleting `/data/token-secret` (or setting a new value) signs everyone out. |
 | `GITHUB_TOKEN` | *secret, optional*: fine-grained PAT, **Contents: read and write** on the content repo only |
 | `GITHUB_REPO` | optional: e.g. `DeveloperAlly/blog-content` |
 | `GITHUB_BRANCH` / `GITHUB_POSTS_DIR` | optional: default `main` / `posts` |

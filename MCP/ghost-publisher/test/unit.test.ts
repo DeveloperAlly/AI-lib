@@ -109,3 +109,17 @@ test('rotating TOKEN_SECRET invalidates existing refresh tokens', async () => {
   await assert.rejects(b.exchangeRefreshToken(client, t2.refresh_token), /Invalid or expired/);
   await assert.rejects(b.verifyAccessToken(t2.access_token), /Invalid access token/);
 });
+
+test('TOKEN_SECRET is generated once and persisted when not configured', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gp-secret-'));
+  const cfg = () => ({ publicUrl: new URL('http://localhost:1'), port: 1, ownerPassphrase: 'p'.repeat(16), tokenSecret: '', dataDir: dir, allowedRedirectHosts: ['localhost'], accessTokenTtlSec: 60, refreshTokenTtlSec: 600 });
+  const res = new URL('http://localhost:1/mcp');
+  const a = new OwnerOAuthProvider(cfg(), res);
+  await a.init();
+  const client = await a.clientsStore.registerClient!({ redirect_uris: ['http://localhost:9/cb'], token_endpoint_auth_method: 'none' } as any);
+  const t = await (a as any).issue(client.client_id, ['ghost:write'], res.href);
+  const b = new OwnerOAuthProvider(cfg(), res); // simulates a restart
+  await b.init();
+  assert.ok(await b.verifyAccessToken(t.access_token), 'token from before restart still valid');
+  assert.ok((await b.exchangeRefreshToken(client, t.refresh_token)).access_token);
+});

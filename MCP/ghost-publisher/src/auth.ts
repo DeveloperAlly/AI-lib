@@ -116,6 +116,19 @@ export class OwnerOAuthProvider implements OAuthServerProvider {
 
   async init(): Promise<void> {
     await this.store.load();
+    if (!this.cfg.tokenSecret) {
+      // No TOKEN_SECRET configured: generate one once and persist it next to the OAuth state.
+      const file = join(this.cfg.dataDir, 'token-secret');
+      try {
+        this.cfg.tokenSecret = (await readFile(file, 'utf8')).trim();
+      } catch {
+        this.cfg.tokenSecret = '';
+      }
+      if (this.cfg.tokenSecret.length < 32) {
+        this.cfg.tokenSecret = randomBytes(32).toString('hex');
+        await writeFile(file, this.cfg.tokenSecret, { mode: 0o600 });
+      }
+    }
   }
 
   get clientsStore(): OAuthRegisteredClientsStore {
