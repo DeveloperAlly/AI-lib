@@ -101,8 +101,9 @@ export async function ensureCover(
   const bytes = await renderCover(spec);
   const url = await ghost.uploadImage({ bytes, name: `ah-cover-${hash}.jpg`, kind: sniffImage(bytes)! });
   const fields: Record<string, unknown> = { feature_image: url };
-  // Only (re)write alt text we own: none yet, or the previous generated cover's.
-  if (!post.feature_image_alt || st.state !== 'custom') fields.feature_image_alt = coverAlt(spec);
+  // Alt text describes the image, so a new cover always gets new alt text
+  // (a replaced chosen image's old alt no longer fits).
+  fields.feature_image_alt = coverAlt(spec);
   const edited = await ghost.edit(post.id, post.updated_at, fields);
   return { action: st.state === 'none' ? 'created' : 'updated', url, post: edited };
 }

@@ -516,7 +516,7 @@ test('webhook rejects unsigned and forged requests', async () => {
 
 test('apply_cover saves settings, refuses to replace a chosen image unless asked', async () => {
   const c = await mcp();
-  const own = await api.posts.add({ title: 'Chosen image post', html: '<p>x</p>', feature_image: `${ghostUrl}/content/images/2026/10/mine.jpg` }, { source: 'html' });
+  const own = await api.posts.add({ title: 'Chosen image post', html: '<p>x</p>', feature_image: `${ghostUrl}/content/images/2026/10/mine.jpg`, feature_image_alt: 'A bar chart' }, { source: 'html' });
   createdIds.push(own.id);
   let g: any = data(await c.callTool({ name: 'get_post', arguments: { id: own.id } }));
   let r: any = await c.callTool({ name: 'apply_cover', arguments: { id: own.id, expected_revision: g.revision } });
@@ -527,5 +527,6 @@ test('apply_cover saves settings, refuses to replace a chosen image unless asked
   const p = await api.posts.read({ id: own.id });
   assert.match(p.feature_image, COVER_RE);
   assert.match(p.codeinjection_head, /"kind":"Field guide","topic":"Testing"/);
+  assert.match(p.feature_image_alt, /Chosen image post/, 'the old alt text described the old image');
   await c.close();
 });
