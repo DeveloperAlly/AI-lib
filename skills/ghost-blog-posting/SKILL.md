@@ -1,17 +1,18 @@
 ---
 name: ghost-blog-posting
-description: Post an article to the Ghost blog via the Ghost Blogs connector: images placed in the text, code blocks tidied, full SEO/AEO, saved as a draft or published.
+description: Post an article to the Ghost blog via the Ghost Blogs connector: images placed in the text, branded cover generated, code blocks tidied, full SEO/AEO, saved as a draft or published.
 ---
 
 # Ghost blog posting
 
-Turns an article (Markdown file, pasted text, or a draft written in chat) plus its images into a correct Ghost post using the **Ghost Blogs** connector (`check_connection`, `list_posts`, `get_post`, `upload_image`, `create_draft`, `update_draft`, `seo_check`, `publish_post`, `unpublish_post`).
+Turns an article (Markdown file, pasted text, or a draft written in chat) plus its images into a correct Ghost post using the **Ghost Blogs** connector (`check_connection`, `list_posts`, `get_post`, `upload_image`, `create_draft`, `update_draft`, `preview_cover`, `apply_cover`, `seo_check`, `publish_post`, `unpublish_post`).
 
 The author's words are hers. This skill fixes structure and metadata; it does not rewrite prose. Any wording change beyond the mechanical fixes listed below needs her OK first.
 
 ## 1. Start: connection, duplicates, draft or publish
 
 1. Call `check_connection`. If it fails, stop and tell the user the connector is not reachable (enable it from the + menu, or reconnect it in Settings > Connectors).
+   - Also check that `preview_cover` and `apply_cover` are in your tool list. If they're missing, the chat is holding an old copy of the connector's tools: say so and suggest starting a new chat. Don't fake a cover with another image.
 2. Call `list_posts` with `search` set to a distinctive part of the title. If a post with that title already exists, ask whether to update it (`update_draft`) or create a new one. Never create a silent duplicate.
 3. Ask **one** question, unless the user already said which: **"Save as a draft, or publish it?"** Offer: *Draft (I'll send you the preview)* and *Publish once checks pass*. Default to draft if there is no answer.
 
@@ -54,6 +55,11 @@ python3 -c "import cairosvg; cairosvg.svg2png(url='in.svg', write_to='out.png', 
 - Before creating the post, call `preview_cover` with the title and tags, and show her the image so she can approve or adjust it.
 - Use a different `feature_image` only if she supplies one or asks for it. Never replace a cover she chose; `apply_cover` needs `replace_custom: true` for that, and only on her say-so.
 - Diagrams from the post stay inline. Don't promote one to feature image unless she asks.
+- **Existing posts:** `apply_cover` (with `expected_revision`) generates the cover and saves its settings, so later title edits in Ghost keep them.
+  - A published post also needs `user_approved: true`.
+  - Replacing an image she chose also needs `replace_custom: true`, and only when she asked for it.
+  - Show her `preview_cover` first.
+- **What happens without you:** posts she creates or retitles directly in Ghost get or refresh their generated cover automatically, about 2 minutes after the last edit. You don't need to do anything for those.
 
 ## 3. Mechanical fixes to the text (allowed without asking; report each one)
 
@@ -63,6 +69,10 @@ python3 -c "import cairosvg; cairosvg.svg2png(url='in.svg', write_to='out.png', 
   - Never change the code itself.
   - Scan code and commands for anything that looks like a real secret: API keys, tokens, passwords, private URLs with credentials. Placeholders like `sk-or-...` are fine. If you find a real-looking secret, stop and ask before posting.
 - **Tables.** Leave Markdown tables as they are; they become HTML cards in Ghost.
+- **Embeds.** This is what Ghost does with them, tested on Ghost 6.72:
+  - **YouTube:** use the provider's `<iframe>` embed code, on its own line. It becomes a native embed card. A bare YouTube link only shows as a text link.
+  - **X:** a pasted X embed (`blockquote.twitter-tweet` plus its script) does **not** survive, because Ghost turns it into a plain quote. Tell her, and either link to the post or ask whether to drop it.
+  - **Anything else:** wrap it in `<!--kg-card-begin: html-->` … `<!--kg-card-end: html-->` to keep it as raw HTML, and tell her it only shows if the provider's code runs on the page.
 - **Links.** Keep them. If a link is obviously broken (a relative path to a file that only exists locally), tell the user rather than guessing a replacement.
 - **Local-only references.** Mentions of files or repos the reader cannot reach are the author's call. Flag them, don't remove them.
 
@@ -98,6 +108,7 @@ AEO advice (suggest these, don't impose them):
    - The tables and code blocks are there.
    - The FAQ section exists, if one was added.
    - No URLs point at the staging location any more.
+   - The feature image is the generated cover, ending in `ah-cover-<hash>.jpg`, unless she supplied her own.
 4. Run `seo_check` if you changed anything after creating the post.
 
 ## 6. Finish
@@ -108,7 +119,7 @@ AEO advice (suggest these, don't impose them):
   - the FAQ you wrote
   - each mechanical fix
   - the remaining findings, and whether they are worth acting on
-- **Publish.** Only if the user chose publish and there are no `error` findings, call `publish_post` with `user_approved: true` and the latest `revision`. Then fetch the live URL and confirm it returns 200, shows the images, and has the meta description in the page head. Publishing never emails subscribers; say so in the report.
+- **Publish.** Only if the user chose publish and there are no `error` findings, call `publish_post` with `user_approved: true` and the latest `revision`. Then fetch the live URL and confirm it returns 200, shows the images, has the meta description in the page head, and that its `og:image` is the cover. Publishing never emails subscribers; say so in the report.
 - If publishing is blocked (error findings, or something needing her decision), leave it as a draft and explain why.
 - Clean up any temporary image staging (section 2).
 
