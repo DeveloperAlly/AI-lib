@@ -46,11 +46,11 @@ function summary(g: Ghost, p: GhostPost) {
   };
 }
 
-const coverSchema = z
-  .union([z.literal(false), coverOptionsSchema])
+const coverSchema = coverOptionsSchema
+  .extend({ off: z.boolean().optional().describe('true = no generated cover for this post') })
   .optional()
-  .describe('Branded cover. Used automatically when no feature_image is given; pass settings to tune the eyebrow/subtitle/motif, or false for no generated cover.');
-const toSetting = (c: CoverSetting | false): CoverSetting => (c === false ? { off: true } : { ...c, off: undefined });
+  .describe('Branded cover. Used automatically when no feature_image is given; pass settings to tune the eyebrow/subtitle/motif, or off: true for no generated cover.');
+const toSetting = (c: CoverSetting): CoverSetting => (c.off ? { off: true } : { ...c, off: undefined });
 void coverState;
 
 export function registerTools(server: McpServer, deps: ToolDeps): void {
@@ -163,7 +163,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       const created = await ghost.createDraft(built.payload);
       let post = await ghost.read({ id: created.id }); // re-read for rendered HTML
       let coverNote = 'Cover: feature image supplied.';
-      if (!input.feature_image) {
+      if (!input.feature_image && !cover?.off) {
         const r = await ensureCover(ghost, post);
         coverNote = `Cover: ${r.action}${r.url ? ` (${r.url})` : ''}.`;
         if (r.url) post = await ghost.read({ id: post.id });
@@ -191,7 +191,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     (raw) => guard(async () => {
-      const a = raw as Partial<PostInput> & { id: string; expected_revision: string; user_approved?: boolean; cover?: CoverSetting | false };
+      const a = raw as Partial<PostInput> & { id: string; expected_revision: string; user_approved?: boolean; cover?: CoverSetting };
       const current = await ghost.read({ id: a.id });
       if (revisionOf(current) !== a.expected_revision)
         return fail(`Revision mismatch: the post changed since revision ${a.expected_revision} (now ${revisionOf(current)}). Re-read it with get_post, check what changed, and retry.`);
