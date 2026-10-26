@@ -311,6 +311,18 @@ test('update_draft: stale revision rejected; correct revision updates in place (
   await c.close();
 });
 
+test('same image as feature and inline is uploaded once', async () => {
+  const c = await mcp();
+  const r = await c.callTool({ name: 'create_draft', arguments: { title: 'E2E dedupe', markdown: `Intro\n\n![Blue](${imgUrl})\n`, feature_image: { url: imgUrl }, feature_image_alt: 'Blue' } });
+  assert.ok(!r.isError, text(r));
+  const d = data(r);
+  createdIds.push(d.id);
+  assert.equal(d.images_uploaded.length, 1);
+  const p = await api.posts.read({ id: d.id }, { formats: 'html' });
+  assert.ok(p.html.includes(p.feature_image), 'inline image and feature image are the same Ghost URL');
+  await c.close();
+});
+
 test('upload_image rejects non-images', async () => {
   const c = await mcp();
   const r = await c.callTool({ name: 'upload_image', arguments: { source: { url: imgUrl.replace('inline.png', 'not-image') } } });

@@ -1,6 +1,7 @@
 // Post content pipeline shared by the MCP tools and the GitHub sync CLI:
 // input schema -> Markdown/HTML -> image upload -> FAQ + JSON-LD -> Ghost payload.
 
+import { createHash } from 'node:crypto';
 import { Marked, type Tokens } from 'marked';
 import { z } from 'zod';
 import type { Ghost } from './ghost.js';
@@ -78,7 +79,13 @@ async function loadSource(src: ImageSource | string, ctx: ContentContext): Promi
 export async function toGhostImage(src: ImageSource | string, ctx: ContentContext, cache?: Map<string, string>): Promise<string> {
   if (typeof src === 'string' && ctx.ghost.isGhostHosted(src)) return src;
   if (typeof src === 'object' && 'url' in src && ctx.ghost.isGhostHosted(src.url)) return src.url;
-  const key = typeof src === 'string' ? src : JSON.stringify(src).slice(0, 500);
+  // Same image referenced as feature image ({url}) and inline (string) must share one key,
+  // or it is uploaded twice.
+  const key =
+    typeof src === 'string' ? src
+    : 'url' in src ? src.url
+    : 'repo_path' in src ? `{repo}${src.repo_path}`
+    : `{b64}${createHash('sha256').update(src.base64).digest('hex')}`;
   const hit = cache?.get(key);
   if (hit) return hit;
   const url = await ctx.ghost.uploadImage(await loadSource(src, ctx));
