@@ -14,6 +14,7 @@ ENV NODE_ENV=production PORT=8080 DATA_DIR=/data
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY assets ./assets
 COPY package.json ./
 RUN mkdir -p /data && chown node:node /data
 USER node
