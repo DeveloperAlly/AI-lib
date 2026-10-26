@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import sharp, { type OverlayOptions } from 'sharp';
+import { drawMotif, motifDefs, pickMotif, type MotifName } from './cover-motifs.js';
 
 export const COVER_WIDTH = 1200;
 export const COVER_HEIGHT = 675;
@@ -70,8 +71,12 @@ export interface CoverSpec {
   kind?: string;
   /** Eyebrow second part, e.g. "Model Context Protocol". */
   topic?: string;
-  /** Varies the ring placement; defaults to the title. */
+  /** Varies the illustration; defaults to the title. */
   seed?: string;
+  /** Illustration; picked from the title/topic/keywords when omitted. */
+  motif?: MotifName;
+  /** Extra words (e.g. tags) used only to pick the illustration. */
+  keywords?: string;
 }
 
 export function paletteFor(kind: string | undefined) {
@@ -124,23 +129,29 @@ async function fitTitle(title: string, maxHeight: number): Promise<TextBox> {
   return text(span(title, { size: 44, color: T.ink0, weight: 800, track: -0.88, lh: 1.04 }), FONT.extrabold, { width: MAX_TITLE_W });
 }
 
-function seeded(seed: string) {
-  const h = createHash('sha256').update(seed).digest();
-  return (i: number) => h[i % h.length] / 255;
+/** Deterministic 0..1 stream (mulberry32) seeded from a string. */
+export function prng(seed: string): () => number {
+  let a = createHash('sha256').update(seed).digest().readUInt32LE(0);
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-function backgroundSvg(spec: CoverSpec, accent: string, wash: readonly [string, string, string]): string {
-  const r = seeded(spec.seed ?? spec.title);
-  const cx = 860 + r(0) * 180; // rings bleed off the right edge
-  const cy = 170 + r(1) * 170;
-  const base = 70 + r(2) * 30;
-  const second = /^#FF/i.test(accent) ? T.mint : T.pink; // the "spark": pink, or mint on pink kinds
-  const rings = [1, 2, 3, 4, 5, 6]
-    .map((i) => `<circle cx="${cx}" cy="${cy}" r="${base * i}" fill="none" stroke="${accent}" stroke-opacity="${(0.34 / i).toFixed(3)}" stroke-width="1.4"/>`)
+interface Box { x: number; y: number; w: number; h: number }
+
+function backgroundSvg(spec: CoverSpec, accent: string, wash: readonly [string, string, string], box: Box): string {
+  const rnd = prng(spec.seed ?? spec.title);
+  const spark = /^#FF/i.test(accent) ? T.mint : T.pink; // pink, or mint on pink kinds
+  const motif = spec.motif ?? pickMotif([spec.title, spec.topic, spec.kind, spec.keywords].filter(Boolean).join(' '), rnd);
+  const art = drawMotif(motif, { ...box, accent, spark, ink: T.ink1, rnd });
+  // Ambient portal rings centred on the art, very faint.
+  const cx = box.x + box.w * 0.55, cy = box.y + box.h * 0.5;
+  const rings = [1, 2, 3, 4, 5, 6, 7]
+    .map((i) => `<circle cx="${cx}" cy="${cy}" r="${90 * i}" fill="none" stroke="${accent}" stroke-opacity="${(0.16 / i).toFixed(3)}" stroke-width="1.2"/>`)
     .join('');
-  const dashR = base * 2.5;
-  const dashRot = Math.round(-40 + r(3) * 80);
-  const sparkA = ((-90 + dashRot) * Math.PI) / 180;
   const cross = (x: number, y: number) =>
     `<path d="M${x - 12} ${y}H${x + 12}M${x} ${y - 12}V${y + 12}" stroke="${accent}" stroke-opacity=".45" stroke-width="1"/>`;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${COVER_WIDTH}" height="${COVER_HEIGHT}">
@@ -151,22 +162,27 @@ function backgroundSvg(spec: CoverSpec, accent: string, wash: readonly [string, 
   <radialGradient id="lift" cx=".5" cy="-.1" r="1.1">
     <stop offset="0" stop-color="#0E2629" stop-opacity=".55"/><stop offset=".5" stop-color="${T.abyss}" stop-opacity="0"/>
   </radialGradient>
-  <radialGradient id="portal" cx="${cx}" cy="${cy}" r="${base * 3.4}" gradientUnits="userSpaceOnUse">
-    <stop offset="0" stop-color="${accent}" stop-opacity=".30"/><stop offset=".42" stop-color="${second}" stop-opacity=".08"/><stop offset="1" stop-color="${T.abyss}" stop-opacity="0"/>
+  <radialGradient id="portal" cx="${cx}" cy="${cy}" r="${Math.max(box.w, box.h) * 0.75}" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="${accent}" stop-opacity=".22"/><stop offset=".5" stop-color="${spark}" stop-opacity=".06"/><stop offset="1" stop-color="${T.abyss}" stop-opacity="0"/>
   </radialGradient>
+  <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="12" cy="12" r="1" fill="#93F7E4" fill-opacity=".07"/></pattern>
   <linearGradient id="scrim" x1="0" y1="0" x2="1" y2="0">
-    <stop offset="0" stop-color="${T.void}" stop-opacity=".55"/><stop offset=".6" stop-color="${T.void}" stop-opacity="0"/>
+    <stop offset="0" stop-color="${T.void}" stop-opacity=".7"/><stop offset=".55" stop-color="${T.void}" stop-opacity=".25"/><stop offset=".8" stop-color="${T.void}" stop-opacity="0"/>
   </linearGradient>
+  <linearGradient id="scrimB" x1="0" y1="0" x2="0" y2="1">
+    <stop offset=".55" stop-color="${T.void}" stop-opacity="0"/><stop offset="1" stop-color="${T.void}" stop-opacity=".6"/>
+  </linearGradient>
+  ${motifDefs(accent, spark)}
 </defs>
 <rect width="100%" height="100%" fill="${T.abyss}"/>
 <rect width="100%" height="100%" fill="url(#wash)"/>
 <rect width="100%" height="100%" fill="url(#lift)"/>
-<circle cx="${cx}" cy="${cy}" r="${base * 3.4}" fill="url(#portal)"/>
+<rect width="100%" height="100%" fill="url(#dots)"/>
+<rect width="100%" height="100%" fill="url(#portal)"/>
 ${rings}
-<circle cx="${cx}" cy="${cy}" r="${dashR}" fill="none" stroke="${second}" stroke-opacity=".5" stroke-width="2" stroke-dasharray="${Math.round(dashR * 4.6)} ${Math.round(dashR * 1.68)}" stroke-linecap="round" transform="rotate(${dashRot} ${cx} ${cy})"/>
-<circle cx="${(cx + dashR * Math.cos(sparkA)).toFixed(1)}" cy="${(cy + dashR * Math.sin(sparkA)).toFixed(1)}" r="5" fill="${second}"/>
-<circle cx="${cx}" cy="${cy}" r="9" fill="${accent}" fill-opacity=".9"/>
+${art}
 <rect width="100%" height="100%" fill="url(#scrim)"/>
+<rect width="100%" height="100%" fill="url(#scrimB)"/>
 ${cross(COVER_WIDTH - X0, 72)}${cross(COVER_WIDTH - X0, 590)}
 <line x1="${X0}" y1="590" x2="${COVER_WIDTH - X0 - 24}" y2="590" stroke="#93F7E4" stroke-opacity=".14"/>
 </svg>`;
@@ -244,9 +260,17 @@ export async function renderCover(spec: CoverSpec): Promise<Buffer> {
   const maxTitleH = bottom - 130;
   const t = await fitTitle(title, maxTitleH);
   if (t.height > maxTitleH) throw new Error('Title is too long to fit on a cover; pass a shorter cover title');
-  layers.push({ input: t.input, left: X0 - 4, top: bottom - t.height });
+  const titleTop = bottom - t.height;
+  layers.push({ input: t.input, left: X0 - 4, top: titleTop });
 
-  return sharp(Buffer.from(backgroundSvg(spec, accent, [w0, w1, accent])))
+  // Illustration box: the clear space above the title when there is enough,
+  // otherwise the right-hand side (the left scrim keeps the title legible).
+  const box: Box = titleTop - 120 >= 230
+    ? { x: 560, y: 108, w: 560, h: titleTop - 140 }
+    : { x: Math.max(600, X0 + t.width + 24), y: 108, w: 0, h: 400 };
+  if (box.w === 0) box.w = Math.max(300, COVER_WIDTH - 60 - box.x);
+
+  return sharp(Buffer.from(backgroundSvg(spec, accent, [w0, w1, accent], box)))
     .composite(layers)
     .jpeg({ quality: 90, chromaSubsampling: '4:4:4', mozjpeg: true })
     .toBuffer();
