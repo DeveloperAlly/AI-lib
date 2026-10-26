@@ -9,6 +9,8 @@ import { buildPayload, imageSourceSchema, postFieldsShape, rewriteMarkdownImages
 import { Ghost, ghostErrorMessage, revisionOf, type GhostPost } from './ghost.js';
 import { GitHubRepo, SKIP_CI, parseMarkdownDoc, toMarkdownDoc } from './github.js';
 import { auditPost, summarise } from './seo.js';
+import { coverHash, coverOptionsSchema, coverState, ensureCover, specForPost, writeCoverSetting, type CoverSetting } from './autocover.js';
+import { renderCover, coverSpecFromPost } from './cover.js';
 
 export interface ToolDeps {
   ghost: Ghost;
@@ -16,7 +18,7 @@ export interface ToolDeps {
   github: GitHubRepo | null;
 }
 
-type Result = { content: { type: 'text'; text: string }[]; isError?: boolean };
+type Result = { content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[]; isError?: boolean };
 const ok = (text: string, data?: unknown): Result => ({
   content: [{ type: 'text', text: data === undefined ? text : `${text}\n\n${JSON.stringify(data, null, 2)}` }],
 });
@@ -43,6 +45,13 @@ function summary(g: Ghost, p: GhostPost) {
     ...(p.status === 'published' ? { live_url: p.url } : { preview_url: g.previewUrl(p) }),
   };
 }
+
+const coverSchema = z
+  .union([z.literal(false), coverOptionsSchema])
+  .optional()
+  .describe('Branded cover. Used automatically when no feature_image is given; pass settings to tune the eyebrow/subtitle/motif, or false for no generated cover.');
+const toSetting = (c: CoverSetting | false): CoverSetting => (c === false ? { off: true } : { ...c, off: undefined });
+void coverState;
 
 export function registerTools(server: McpServer, deps: ToolDeps): void {
   const { ghost, github } = deps;
@@ -144,18 +153,25 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       title: 'Create draft post',
       description:
         'Create a NEW post as a DRAFT (never published). Write the body in Markdown; inline images (![alt](url "caption")) and the feature image are uploaded to Ghost automatically. Fill the SEO fields (meta_title <= 60 chars, meta_description 70-160 chars, excerpt, feature_image_alt) and, for answer-engine optimisation, open with a direct answer and add an faq list. Returns preview and editor links plus an SEO/AEO check. Show the owner the preview link and wait for explicit approval before calling publish_post.',
-      inputSchema: postFieldsShape,
+      inputSchema: { ...postFieldsShape, cover: coverSchema },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    (input) => guard(async () => {
+    ({ cover, ...input }) => guard(async () => {
       if (input.markdown === undefined && input.html === undefined) return fail('Provide the post body as markdown (preferred) or html.');
       const built = await buildPayload(input, ctx);
+      if (cover !== undefined) built.payload.codeinjection_head = writeCoverSetting(built.payload.codeinjection_head as string | undefined, toSetting(cover));
       const created = await ghost.createDraft(built.payload);
-      const post = await ghost.read({ id: created.id }); // re-read for rendered HTML
+      let post = await ghost.read({ id: created.id }); // re-read for rendered HTML
+      let coverNote = 'Cover: feature image supplied.';
+      if (!input.feature_image) {
+        const r = await ensureCover(ghost, post);
+        coverNote = `Cover: ${r.action}${r.url ? ` (${r.url})` : ''}.`;
+        if (r.url) post = await ghost.read({ id: post.id });
+      }
       const findings = auditPost(post);
       const md = input.markdown !== undefined ? rewriteMarkdownImages(input.markdown, built.imageMap) : undefined;
       const mirrored = await mirror(post, { markdown: md, html: md === undefined ? input.html : undefined, tags: input.tags, faq: input.faq }, 'draft');
-      return ok(`Draft created. Not published.\n${mirrored}\n${summarise(findings)}`, { ...summary(ghost, post), images_uploaded: built.uploaded, findings });
+      return ok(`Draft created. Not published.\n${coverNote}\n${mirrored}\n${summarise(findings)}`, { ...summary(ghost, post), images_uploaded: built.uploaded, findings });
     }),
   );
 
@@ -169,29 +185,100 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
         id: z.string(),
         expected_revision: z.string().describe('revision from the most recent read of this post'),
         ...Object.fromEntries(Object.entries(postFieldsShape).map(([k, v]) => [k, k === 'title' ? (v as z.ZodString).optional() : v])),
+        cover: coverSchema,
         user_approved: z.boolean().optional().describe('Required (true) only when the post is already published'),
       } as Record<string, z.ZodTypeAny>,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     (raw) => guard(async () => {
-      const a = raw as Partial<PostInput> & { id: string; expected_revision: string; user_approved?: boolean };
+      const a = raw as Partial<PostInput> & { id: string; expected_revision: string; user_approved?: boolean; cover?: CoverSetting | false };
       const current = await ghost.read({ id: a.id });
       if (revisionOf(current) !== a.expected_revision)
         return fail(`Revision mismatch: the post changed since revision ${a.expected_revision} (now ${revisionOf(current)}). Re-read it with get_post, check what changed, and retry.`);
       if (current.status !== 'draft' && a.user_approved !== true)
         return fail(`This post is ${current.status}. Changing it alters the live page; ask the owner to approve this specific change, then call again with user_approved: true.`);
-      const { id, expected_revision, user_approved, ...fields } = a;
+      const { id, expected_revision, user_approved, cover, ...fields } = a;
       void expected_revision;
       void user_approved;
       if (fields.faq !== undefined && fields.markdown === undefined && fields.html === undefined)
         return fail('To change the FAQ, pass the full body too (markdown or html) so the visible FAQ section and its structured data stay in sync.');
       const built = await buildPayload(fields, ctx, { existingHead: current.codeinjection_head as string | null });
+      if (cover !== undefined)
+        built.payload.codeinjection_head = writeCoverSetting((built.payload.codeinjection_head as string | undefined) ?? (current.codeinjection_head as string | null), toSetting(cover));
       const edited = await ghost.edit(id, current.updated_at, built.payload, { html: built.hasBody });
-      const post = await ghost.read({ id: edited.id });
+      let post = await ghost.read({ id: edited.id });
+      // Keep a generated cover in step with the new title/tags/settings (never touches a chosen image).
+      const coverRes = fields.feature_image ? null : await ensureCover(ghost, post);
+      if (coverRes?.url) post = await ghost.read({ id: post.id });
       const md = fields.markdown !== undefined ? rewriteMarkdownImages(fields.markdown, built.imageMap) : undefined;
       const mirrored = await mirror(post, built.hasBody ? { markdown: md, html: md === undefined ? fields.html : undefined, tags: fields.tags, faq: fields.faq } : null, 'update');
       const findings = auditPost(post);
-      return ok(`Post updated (status: ${post.status}).\n${mirrored}\n${summarise(findings)}`, { ...summary(ghost, post), images_uploaded: built.uploaded, findings });
+      return ok(`Post updated (status: ${post.status}).\nCover: ${coverRes ? coverRes.action : 'feature image supplied'}.\n${mirrored}\n${summarise(findings)}`, { ...summary(ghost, post), images_uploaded: built.uploaded, findings });
+    }),
+  );
+
+  server.registerTool(
+    'preview_cover',
+    {
+      title: 'Preview cover',
+      description:
+        "Render the branded cover (1200x675, Alison Haire design system) without changing anything and return the image. Give a post id to preview that post's cover with its current title/tags/settings (optionally overridden), or give a title to preview a cover for a post that doesn't exist yet.",
+      inputSchema: { id: z.string().optional(), tags: z.array(z.string()).max(10).optional().describe('Tags, when previewing without a post id'), ...coverOptionsSchema.shape },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    (a) => guard(async () => {
+      const { id, tags, ...opts } = a;
+      let spec;
+      if (id) {
+        const p = await ghost.read({ id });
+        const base = specForPost(p);
+        spec = { ...base, ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)) };
+      } else if (opts.title) spec = coverSpecFromPost({ title: opts.title, tags }, { ...opts, title: undefined, keywords: (tags ?? []).join(' ') });
+      else return fail('Give a post id or a title.');
+      const jpg = await renderCover(spec);
+      return {
+        content: [
+          { type: 'image', data: jpg.toString('base64'), mimeType: 'image/jpeg' },
+          { type: 'text', text: `Preview only; nothing was changed.\n${JSON.stringify({ ...spec, hash: coverHash(spec) }, null, 2)}` },
+        ],
+      };
+    }),
+  );
+
+  server.registerTool(
+    'apply_cover',
+    {
+      title: 'Apply generated cover',
+      description:
+        "Generate the branded cover for a post and set it as the feature image, optionally saving cover settings (eyebrow kind/topic, cover title, subtitle, motif) that later title edits in Ghost keep using. Replaces a generated cover freely, but replaces an image the owner chose only with replace_custom: true. Changing a PUBLISHED post needs user_approved: true after the owner approved it in chat. Pass off: true to stop automatic covers for this post.",
+      inputSchema: {
+        id: z.string(),
+        expected_revision: z.string(),
+        ...coverOptionsSchema.shape,
+        off: z.boolean().optional().describe('Disable automatic covers for this post'),
+        replace_custom: z.boolean().default(false).describe('Replace a feature image the owner chose (only if they asked)'),
+        user_approved: z.boolean().optional(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    (a) => guard(async () => {
+      let post = await ghost.read({ id: a.id });
+      if (revisionOf(post) !== a.expected_revision) return fail(`Revision mismatch (now ${revisionOf(post)}). Re-read the post and retry.`);
+      if (post.status !== 'draft' && a.user_approved !== true)
+        return fail(`This post is ${post.status}; changing its cover changes the live page. Get the owner's approval, then call again with user_approved: true.`);
+      const { id, expected_revision, replace_custom, user_approved, ...opts } = a;
+      void id; void expected_revision; void user_approved;
+      const hasOpts = Object.values(opts).some((v) => v !== undefined);
+      if (hasOpts) {
+        const head = writeCoverSetting(post.codeinjection_head as string | null, opts.off ? { off: true } : { ...opts, off: undefined });
+        await ghost.edit(post.id, post.updated_at, { codeinjection_head: head });
+        post = await ghost.read({ id: post.id });
+      }
+      if (opts.off) return ok('Automatic covers are off for this post. The current feature image was left as is.', summary(ghost, post));
+      const r = await ensureCover(ghost, post, { replaceCustom: replace_custom });
+      if (r.action === 'kept-custom') return fail('This post has a feature image the owner chose. Pass replace_custom: true only if she asked to replace it.');
+      post = await ghost.read({ id: post.id });
+      return ok(`Cover ${r.action}.`, { ...summary(ghost, post), feature_image: post.feature_image });
     }),
   );
 

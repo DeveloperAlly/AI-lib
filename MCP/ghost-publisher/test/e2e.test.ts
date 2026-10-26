@@ -59,10 +59,14 @@ before(async () => {
     GITHUB_TOKEN: 'test-gh-token',
     GITHUB_REPO: 'DeveloperAlly/blog-content',
     GITHUB_API_URL: ghSrv.url,
+    // Ghost runs in Docker and reaches this process via the bridge gateway.
+    COVER_WEBHOOK_BASE: `http://${process.env.DOCKER_HOST_IP ?? '172.17.0.1'}:${port}`,
+    COVER_DEBOUNCE_SEC: '1',
   });
   const { createApp } = await import('../src/server.js');
-  const { app } = await createApp();
-  const srv = await new Promise<import('node:http').Server>((r) => { const s = app.listen(port, '127.0.0.1', () => r(s)); });
+  const { app, registerGhostWebhooks } = await createApp();
+  const srv = await new Promise<import('node:http').Server>((r) => { const s = app.listen(port, '0.0.0.0', () => r(s)); });
+  await registerGhostWebhooks();
   base = `http://localhost:${port}`;
   closeAll = async () => {
     for (const s of [srv, img.server, ghSrv.server]) s.closeAllConnections?.(), await new Promise((r) => s.close(r));
@@ -71,6 +75,10 @@ before(async () => {
 
 after(async () => {
   for (const id of createdIds) await api.posts.delete({ id }).catch(() => {});
+  try {
+    const { ids } = JSON.parse(await readFile(join(dataDir, 'webhooks.json'), 'utf8'));
+    for (const id of ids) await (api as any).webhooks.delete({ id }).catch(() => {});
+  } catch { /* none registered */ }
   await closeAll?.();
   await rm(dataDir, { recursive: true, force: true });
 });
@@ -196,7 +204,7 @@ let draft: any;
 test('tool list is the narrow publishing surface (no delete)', async () => {
   const c = await mcp();
   const names = (await c.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['check_connection', 'create_draft', 'get_post', 'list_posts', 'publish_post', 'seo_check', 'unpublish_post', 'update_draft', 'upload_image']);
+  assert.deepEqual(names, ['apply_cover', 'check_connection', 'create_draft', 'get_post', 'list_posts', 'preview_cover', 'publish_post', 'seo_check', 'unpublish_post', 'update_draft', 'upload_image']);
   const pub = (await c.listTools()).tools.find((t) => t.name === 'publish_post')!;
   assert.equal(pub.annotations?.destructiveHint, true);
   const conn = await c.callTool({ name: 'check_connection', arguments: {} });
@@ -431,4 +439,93 @@ test('sync CLI: creates once, updates in place, refuses conflicts, publishes onl
     process.chdir(cwd);
     await rm(repo, { recursive: true, force: true });
   }
+});
+
+
+// ---------------- automatic covers ----------------
+
+const COVER_RE = /\/ah-cover-([0-9a-f]{12})(?:-\d+)?\.jpg$/;
+async function waitFor<T>(fn: () => Promise<T | undefined>, ms = 30000): Promise<T> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() > end) throw new Error('timed out waiting');
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+test('create_draft without a feature image gets a branded cover; preview_cover returns an image', async () => {
+  const c = await mcp();
+  const r: any = await c.callTool({ name: 'create_draft', arguments: { title: 'Agents that survive restarts', markdown: 'Body text for the cover test.', tags: ['Playbook', 'Agents'], cover: { subtitle: 'Checkpoints, not hope.' } } });
+  assert.ok(!r.isError, text(r));
+  const d = data(r);
+  createdIds.push(d.id);
+  const p = await api.posts.read({ id: d.id });
+  assert.match(p.feature_image, COVER_RE);
+  assert.match(p.feature_image_alt, /Agents that survive restarts/);
+  assert.match(p.codeinjection_head, /ghost-publisher-mcp:cover \{"subtitle":"Checkpoints, not hope."\}/);
+  const img = await fetch(p.feature_image);
+  assert.equal(img.headers.get('content-type'), 'image/jpeg');
+
+  const pv: any = await c.callTool({ name: 'preview_cover', arguments: { id: d.id, subtitle: 'Different subtitle' } });
+  assert.equal(pv.content[0].type, 'image');
+  assert.ok(Buffer.from(pv.content[0].data, 'base64').length > 20000);
+  assert.equal((await api.posts.read({ id: d.id })).feature_image, p.feature_image, 'preview changes nothing');
+  await c.close();
+});
+
+test('webhook: a post created in Ghost gets a cover, a title edit refreshes it, a chosen image is never replaced', async () => {
+  // Created directly in Ghost (no MCP): the webhook should add a cover.
+  const made = await api.posts.add({ title: 'Written straight into Ghost', html: '<p>Hello</p>', tags: [{ name: 'Essay' }] }, { source: 'html' });
+  createdIds.push(made.id);
+  const first = await waitFor(async () => {
+    const p = await api.posts.read({ id: made.id });
+    return COVER_RE.test(p.feature_image ?? '') ? p : undefined;
+  });
+  const firstHash = COVER_RE.exec(first.feature_image)![1];
+
+  // Edit the title in Ghost: the generated cover is regenerated.
+  await api.posts.edit({ id: made.id, updated_at: first.updated_at, title: 'Renamed in the Ghost editor' });
+  const second = await waitFor(async () => {
+    const p = await api.posts.read({ id: made.id });
+    const h = COVER_RE.exec(p.feature_image ?? '')?.[1];
+    return h && h !== firstHash ? p : undefined;
+  });
+  assert.match(second.feature_image_alt, /Renamed in the Ghost editor/);
+
+  // A post with an image the owner chose: title edits leave it alone.
+  const own = await api.posts.add({ title: 'Has its own image', html: '<p>x</p>', feature_image: first.feature_image.replace(/ah-cover-[^/]+$/, 'mine.jpg') }, { source: 'html' });
+  createdIds.push(own.id);
+  const ownRead = await api.posts.read({ id: own.id });
+  await api.posts.edit({ id: own.id, updated_at: ownRead.updated_at, title: 'Has its own image, renamed' });
+  await new Promise((r) => setTimeout(r, 4000));
+  assert.equal((await api.posts.read({ id: own.id })).feature_image, ownRead.feature_image);
+});
+
+test('webhook rejects unsigned and forged requests', async () => {
+  const { ids, target } = JSON.parse(await readFile(join(dataDir, 'webhooks.json'), 'utf8'));
+  assert.equal(ids.length, 2);
+  const path = new URL(target).pathname;
+  const body = JSON.stringify({ post: { current: { id: 'a'.repeat(24) } } });
+  let res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  assert.equal(res.status, 401);
+  res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ghost-signature': `sha256=${'0'.repeat(64)}, t=${Date.now()}` }, body });
+  assert.equal(res.status, 401);
+});
+
+test('apply_cover saves settings, refuses to replace a chosen image unless asked', async () => {
+  const c = await mcp();
+  const own = await api.posts.add({ title: 'Chosen image post', html: '<p>x</p>', feature_image: `${ghostUrl}/content/images/2026/10/mine.jpg` }, { source: 'html' });
+  createdIds.push(own.id);
+  let g: any = data(await c.callTool({ name: 'get_post', arguments: { id: own.id } }));
+  let r: any = await c.callTool({ name: 'apply_cover', arguments: { id: own.id, expected_revision: g.revision } });
+  assert.ok(r.isError && /replace_custom/.test(text(r)), text(r));
+  g = data(await c.callTool({ name: 'get_post', arguments: { id: own.id } }));
+  r = await c.callTool({ name: 'apply_cover', arguments: { id: own.id, expected_revision: g.revision, kind: 'Field guide', topic: 'Testing', replace_custom: true } });
+  assert.ok(!r.isError, text(r));
+  const p = await api.posts.read({ id: own.id });
+  assert.match(p.feature_image, COVER_RE);
+  assert.match(p.codeinjection_head, /"kind":"Field guide","topic":"Testing"/);
+  await c.close();
 });

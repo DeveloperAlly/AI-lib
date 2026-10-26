@@ -12,8 +12,9 @@ import { OwnerOAuthProvider, SCOPE } from './auth.js';
 import { Ghost } from './ghost.js';
 import { GitHubRepo } from './github.js';
 import { registerTools } from './tools.js';
+import { CoverScheduler, loadWebhookSecret, mountWebhook, registerWebhooks } from './webhook.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 export async function createApp() {
   const cfg = loadServerConfig();
@@ -34,6 +35,16 @@ export async function createApp() {
   app.get('/health', (_req, res) => {
     res.json({ ok: true, version: VERSION });
   });
+
+  // Ghost -> server webhook for automatic covers. Mounted before host validation
+  // (Ghost may reach us by another name); authenticated by Ghost's HMAC signature.
+  let webhook: { target: string; secret: string } | null = null;
+  if (process.env.AUTO_COVER_WEBHOOK !== 'false') {
+    const secret = await loadWebhookSecret(cfg.dataDir, process.env.GHOST_WEBHOOK_SECRET?.trim());
+    const delaySec = Math.max(1, Number(process.env.COVER_DEBOUNCE_SEC ?? 120) || 120);
+    const path = mountWebhook(app, { secret, scheduler: new CoverScheduler(ghost, delaySec * 1000) });
+    webhook = { target: new URL(path, process.env.COVER_WEBHOOK_BASE?.trim() || cfg.publicUrl).href, secret };
+  }
 
   app.use(hostHeaderValidation([cfg.publicUrl.hostname]));
 
@@ -80,14 +91,21 @@ export async function createApp() {
   app.get('/mcp', auth, notAllowed);
   app.delete('/mcp', auth, notAllowed);
 
-  return { app, cfg, github };
+  /** Register the Ghost webhooks (call after the server is listening). */
+  const registerGhostWebhooks = async () => {
+    if (webhook) await registerWebhooks(ghost, cfg.dataDir, webhook.target, webhook.secret).catch((e) => console.error('auto-cover: webhook registration failed', e));
+  };
+
+  return { app, cfg, github, registerGhostWebhooks };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   createApp()
-    .then(({ app, cfg, github }) => {
+    .then(({ app, cfg, github, registerGhostWebhooks }) => {
       app.listen(cfg.port, '0.0.0.0', () => {
         console.log(`ghost-publisher-mcp ${VERSION} listening on :${cfg.port}; MCP endpoint ${new URL('/mcp', cfg.publicUrl).href}; GitHub mirror ${github ? 'on' : 'off'}`);
+        // Give the platform's proxy a moment to route to us before Ghost tests the URL.
+        setTimeout(() => void registerGhostWebhooks(), 5000).unref();
       });
     })
     .catch((e) => {

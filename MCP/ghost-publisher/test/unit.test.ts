@@ -123,3 +123,76 @@ test('TOKEN_SECRET is generated once and persisted when not configured', async (
   assert.ok(await b.verifyAccessToken(t.access_token), 'token from before restart still valid');
   assert.ok((await b.exchangeRefreshToken(client, t.refresh_token)).access_token);
 });
+
+// ---------------- covers ----------------
+import sharp from 'sharp';
+import { createHmac } from 'node:crypto';
+import { renderCover, coverSpecFromPost } from '../src/cover.js';
+import { pickMotif } from '../src/cover-motifs.js';
+import { readCoverSetting, writeCoverSetting, coverState, coverHash, specForPost } from '../src/autocover.js';
+import { verifyGhostSignature } from '../src/webhook.js';
+
+test('cover renders a 1200x675 JPEG deterministically, and rejects an empty title', async () => {
+  const spec = { title: 'Building Your Own MCP Server', subtitle: 'What I learnt.', kind: 'Playbook', topic: 'MCP' };
+  const a = await renderCover(spec);
+  const meta = await sharp(a).metadata();
+  assert.equal(meta.format, 'jpeg');
+  assert.equal(meta.width, 1200);
+  assert.equal(meta.height, 675);
+  assert.ok((await renderCover(spec)).equals(a), 'same input, same bytes');
+  await assert.rejects(renderCover({ title: '  ' }), /title/);
+});
+
+test('long titles shrink to fit instead of overflowing', async () => {
+  const long = 'A very long title about retrieval augmented generation, context caching and the trade-offs between them in production';
+  const meta = await sharp(await renderCover({ title: long, subtitle: 'Still fits.' })).metadata();
+  assert.equal(meta.height, 675);
+});
+
+test('cover spec: kind from tags, topic from the next tag, "Title. Rest" splits into a subtitle', () => {
+  const s = coverSpecFromPost({ title: "n8n Got a Brain. Here's What That Actually Means for Your Workflows.", tags: ['Field notes', 'Workflow automation'] });
+  assert.equal(s.title, 'n8n Got a Brain');
+  assert.equal(s.subtitle, "Here's What That Actually Means for Your Workflows.");
+  assert.equal(s.kind, 'Field notes');
+  assert.equal(s.topic, 'Workflow automation');
+  assert.equal(coverSpecFromPost({ title: 'RAG vs CAG', tags: [] }).kind, 'Field notes');
+});
+
+test('motif follows the topic', () => {
+  const r = () => 0.5;
+  assert.equal(pickMotif('n8n Got a Brain workflow automation', r), 'workflow');
+  assert.equal(pickMotif('Building Your Own MCP Server', r), 'hub');
+  assert.equal(pickMotif('Why & when to use LangGraph', r), 'graph');
+  assert.equal(pickMotif('RAG vs CAG', r), 'retrieval');
+  assert.equal(pickMotif('The Competitive Edge of deAI', r), 'network');
+});
+
+test('cover settings live in a managed code-injection block that keeps other content', () => {
+  const head = writeCoverSetting('<meta name="x" content="keep">', { subtitle: 'a --> b', kind: 'Essay' });
+  assert.match(head, /keep/);
+  assert.doesNotMatch(head.split('cover ')[1], /-->.*-->/s, 'value cannot close the comment early');
+  assert.deepEqual(readCoverSetting(head), { subtitle: 'a --> b', kind: 'Essay' });
+  const again = writeCoverSetting(head, { topic: 'T' });
+  assert.deepEqual(readCoverSetting(again), { topic: 'T' });
+  assert.equal(writeCoverSetting(again, {}), '<meta name="x" content="keep">');
+});
+
+test('cover ownership: only ah-cover-<hash>.jpg files count as generated; hash tracks title changes', () => {
+  assert.deepEqual(coverState(null), { state: 'none' });
+  assert.deepEqual(coverState('https://b/content/images/2026/10/ah-cover-0123456789ab.jpg'), { state: 'generated', hash: '0123456789ab' });
+  assert.deepEqual(coverState('https://b/content/images/2026/10/ah-cover-0123456789ab-1.jpg'), { state: 'generated', hash: '0123456789ab' });
+  assert.deepEqual(coverState('https://b/content/images/2026/10/my-photo.jpg'), { state: 'custom' });
+  const p = { title: 'One', slug: 'one', tags: [{ name: 'Essay' }] };
+  assert.equal(coverHash(specForPost(p)), coverHash(specForPost({ ...p })));
+  assert.notEqual(coverHash(specForPost(p)), coverHash(specForPost({ ...p, title: 'Two' })));
+});
+
+test('Ghost webhook signature: HMAC over body + timestamp, fresh timestamp required', () => {
+  const secret = 's'.repeat(32), body = Buffer.from('{"post":{}}'), t = String(Date.now());
+  const sig = createHmac('sha256', secret).update(Buffer.concat([body, Buffer.from(t)])).digest('hex');
+  assert.ok(verifyGhostSignature(body, `sha256=${sig}, t=${t}`, secret));
+  assert.ok(!verifyGhostSignature(body, `sha256=${sig}, t=${t}`, 'x'.repeat(32)));
+  assert.ok(!verifyGhostSignature(Buffer.from('{"post":1}'), `sha256=${sig}, t=${t}`, secret));
+  assert.ok(!verifyGhostSignature(body, `sha256=${sig}, t=${t}`, secret, Number(t) + 11 * 60_000), 'stale');
+  assert.ok(!verifyGhostSignature(body, undefined, secret));
+});

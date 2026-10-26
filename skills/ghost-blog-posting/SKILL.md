@@ -45,10 +45,15 @@ python3 -c "import cairosvg; cairosvg.svg2png(url='in.svg', write_to='out.png', 
    - Delete the staging location after the post is created. If you cannot delete it, tell the user it is safe to delete, because Ghost keeps its own copies.
 4. **Base64.** Only for small images (under about 150 KB each), since the bytes travel through the conversation.
 
-**Feature image.**
-- Pick the image that best represents the post. Prefer one that is already around 1200×630, because that is the social card size. If none fits, ask.
-- Give it alt text through `feature_image_alt`.
-- If the feature image also appears inline, use the same source both times. The server uploads it once.
+**Feature image: the branded cover (default).**
+- Leave `feature_image` out. The server then generates the branded cover: Alison Haire design system, a topic illustration, and the LinkedIn and X handles. This keeps every cover on the blog consistent. Its alt text is set automatically.
+- Set the eyebrow through tags. Include one kind tag (Essay, Playbook, Field guide, Field notes, Tutorial, Analysis, Research, Op-ed, Interview); the next tag becomes the topic.
+- Pass `cover: { subtitle, kind, topic, title, motif }` when the defaults aren't right:
+  - `title`: use a shorter cover title when the post title is long. "Title. Rest" and "Title: Rest" split into title and subtitle automatically.
+  - `subtitle`: one line of at most about 60 characters, in the author's voice and taken from the post.
+- Before creating the post, call `preview_cover` with the title and tags, and show her the image so she can approve or adjust it.
+- Use a different `feature_image` only if she supplies one or asks for it. Never replace a cover she chose; `apply_cover` needs `replace_custom: true` for that, and only on her say-so.
+- Diagrams from the post stay inline. Don't promote one to feature image unless she asks.
 
 ## 3. Mechanical fixes to the text (allowed without asking; report each one)
 

@@ -24,10 +24,27 @@ blog.mcp.developerally.io/mcp ──── Ghost Admin API ──┤            
 | `seo_check` | Title/description length, slug, heading structure, alt text, feature image, code-block languages, links, answer-first opening, FAQ coverage. |
 | `publish_post` | Goes live. Requires `user_approved: true` and the reviewed `expected_revision`; blocked on SEO errors (for example missing alt text) unless explicitly accepted. Never emails subscribers. |
 | `unpublish_post` | Back to draft, same approval rules. |
+| `preview_cover` | Renders the branded cover for a post (or a title) and returns the image. Changes nothing. |
+| `apply_cover` | Generates the cover and sets it as the feature image; can save cover settings (eyebrow kind/topic, cover title, subtitle, motif) or turn automatic covers off for a post. |
 
 There is deliberately **no delete** and no access to members, newsletters, themes or settings.
 
 **Content support:** Markdown with headings, lists, links, tables, images (`![alt](src "caption")` becomes a native Ghost image card with alt text and caption) and fenced code blocks (the language is kept and becomes a native Ghost code card). Images can be https URLs, base64, or paths in the content repo; they are re-hosted on Ghost. JPEG, PNG, GIF and WebP only (SVG is refused because it can carry script). Video and audio are not supported yet.
+
+## Branded covers
+
+Every post gets a 1200×675 cover in the Alison Haire design system unless it has a feature image of its own:
+- Same palette per post kind as the website's thumbnails (Essay pink, Playbook/Tutorial green, Field guide/Analysis teal, Field notes mint…), Plus Jakarta Sans throughout, the AH mark, `blog.alisonhaire.com`, `in/ally-haire` and `@DeveloperAlly`.
+- A topic illustration drawn in code (workflow, hub, agent graph, retrieval, network, model surface), chosen from the title and tags. The same input always gives the same picture.
+- Eyebrow = the kind tag (Essay, Playbook, Field guide, Field notes, …) and the first other tag. "Title. Rest" or "Title: Rest" titles split into title and subtitle. Settings can be pinned per post with `create_draft`/`update_draft`/`apply_cover` `cover: {...}`; they are stored in a comment block in the post's code injection.
+
+**Where covers come from**
+- `create_draft` / `update_draft` without a `feature_image`: generated immediately, and refreshed when the title, tags or settings change.
+- **Posts written directly in Ghost:** on start-up the server registers two Ghost webhooks (`post.added`, `post.edited`) on its own integration. They are signed with a secret kept in `/data/webhook-secret`. After a post goes 2 minutes without edits (`COVER_DEBOUNCE_SEC`), the server gives it a cover, or regenerates the generated one if the title, tags or excerpt changed.
+- **Ownership:** only files named `ah-cover-<hash>.jpg` count as generated. An image you chose yourself is never replaced, unless `apply_cover` is called with `replace_custom: true`.
+- **Known edge:** if you are still in the Ghost editor when the cover updates (after the 2 quiet minutes), your next save may say someone else edited the post. Reload and carry on.
+
+Settings: `AUTO_COVER_WEBHOOK=false` turns the webhook off. `COVER_DEBOUNCE_SEC` defaults to 120. `GHOST_WEBHOOK_SECRET` is optional; by default a secret is generated and kept on the volume. Bump `COVER_RENDER_VERSION` in `src/autocover.ts` after a design change and generated covers refresh on their next edit (use `apply_cover` to refresh one now).
 
 ## Safety model
 
