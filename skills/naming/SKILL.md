@@ -133,14 +133,17 @@ Ruling, 27 Oct 2026: H2s are concept names; H3s may carry a claim or a question.
 
 The Livepeer v2 docs bar, and the default for any docs site. Canonical examples (`v2/orchestrators/guides/staking-and-rewards/earning-model.mdx`): `ETH Service Fees`, `LPT Inflationary Rewards`, `Commission Parameters`, `Payment Flow Summary`, `Monitoring Your Earnings`.
 
-Every heading is a noun phrase of 2-5 words, Title Case, concrete and predictive.
+Every heading is a noun phrase of 2-5 words, Title Case, concrete and predictive. The gate every heading on a page passes before the page is reviewed. Body prose, frontmatter and page structure belong to `prose-quality`, `page-authoring` and `structure-rules`.
+
+**Predictive test**, the one that catches everything: before reading any body copy, can the reader predict what is in the section from the heading alone? `ETH Service Fees`, `Commission Parameters`, `Co-Location Patterns` pass; `Surface Selection` (selection of what, for what?) fails; `Honesty Enforcement` is borderline and the section may need restructuring into named mechanisms.
 
 Hard rules:
-- **No question stems.** `Why Pipelines Matter` → `Pipeline Role`; `What an SPE Is` → `SPEs`; `How Work and Value Move` → `Work and Value Flow`; `Where to go next` → `Continue by Role`.
-- **No numbers in names.** `Three Architectural Layers` → `Architectural Layers`. The number goes in the opening sentence.
-- **No sentences.** `Trickle carries live frames between gateway and AI worker` → `Trickle Protocol`.
+- **No question stems** (What, How, When, Where, Why), as questions or as statements. `Why Pipelines Matter` → `Pipeline Role`; `What Permissionless Participation Means Here` → `Permissionless Participation`; `What an SPE Is` → `SPEs`; `What Changed Since the Whitepaper` → `Changes Since the 2017 Whitepaper`; `How to Propose an SPE` → `SPE Proposal Route`; `How Work and Value Move` → `Work and Value Flow`; `Where the On-Chain Mechanics Live` → `On-Chain Mechanics`; `Where Code Talks to the Network` → `Network Interfaces`; `Where to go next` → `Continue by Role`. `Why X Matters` sections are usually filler: delete the section and fold its sentence into the intro.
+- **No numbers in names.** `Three Architectural Layers` → `Architectural Layers`; `Five Surfaces` → `Observability Surfaces`. The number goes in the opening sentence.
+- **No sentences.** `Trickle carries live frames between gateway and AI worker` → `Trickle Protocol`; `A ticket's expected value equals face value times win probability` → `Probabilistic Micropayments`. The thesis sentence goes in the section's opening paragraph.
 - **No `The` opener.** `The Network's Role` → `Network Role`.
-- **No abstract noun piles.** `Surface Selection`, `Composite Health Read` fail the predictive test. If no concrete name exists, the section needs restructuring, not renaming.
+- **No abstract noun piles.** `Surface Selection`, `Composite Health Read`, `Property Provenance` fail the predictive test. If no concrete name exists, the section needs restructuring, not renaming.
+- **No bare topic names.** `Configuration`, `Overview` predict nothing: name the specific configuration or content.
 - **Title Case**, both halves of hyphenated compounds (`On-Chain`, `Off-Chain`, `Real-Time`, `Trade-Offs`). Short function words stay lowercase unless first. Acronyms stay as written (`ETH`, `LPT`, `BYOC`, `SPE`, `AI`, `gRPC`, `RTMP`).
 - **No parenthetical clarifiers** (`X (Y)`): choose one.
 - **Sidebar test:** it must work as a navigation link at about 200px.

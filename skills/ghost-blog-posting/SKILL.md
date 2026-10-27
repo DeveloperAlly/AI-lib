@@ -48,6 +48,7 @@ Verified on blog.alisonhaire.com (Ghost 6.44 to 6.72).
 | Footnotes | Not supported. Use inline links. |
 | Embeds | YouTube: the provider's `<iframe>` on its own line becomes a native embed card; a bare link stays a text link. X: a pasted X embed is turned into a plain quote and does not render, so link to the post instead or ask. Anything else: wrap it in `<!--kg-card-begin: html-->` ... `<!--kg-card-end: html-->`, and note it only shows if the provider's script runs. `prove-it-tutorial` section 6 covers embeds in that mode. |
 | Links | Keep them. Flag ones that are obviously broken, such as relative paths to local files, rather than guessing a replacement. |
+| Local-only references | Mentions of files or repos the reader cannot reach are the author's call. Flag them; don't remove them. |
 
 ## While posting
 

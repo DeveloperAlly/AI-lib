@@ -21,6 +21,8 @@ Works alone (for an existing post or a title that does not exist yet), or as a s
 
 `title` and `subtitle` are cover-only; they do not change the post.
 
+Use a different feature image only when Ally supplies one or asks for it. Diagrams from the post stay inline; don't promote one to feature image unless she asks.
+
 ## Steps
 
 1. **Preview.** Call `preview_cover` with the post `id` (or a `title` and `tags` for a post not yet created) plus the settings. Show Ally the image. Nothing changes.
