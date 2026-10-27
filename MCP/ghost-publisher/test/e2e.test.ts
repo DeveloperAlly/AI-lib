@@ -241,7 +241,7 @@ test('create_draft: markdown with inline + repo + base64 images, code, SEO and F
       slug: 'e2e-claude-ghost-publishing',
       markdown: markdown.replace('IMG', imgUrl),
       excerpt: 'Drafts first, approval second: how the Claude to Ghost connector works.',
-      tags: ['AI', 'Ghost'],
+      tags: ['AI Engineering', 'AI', 'Ghost'],
       feature_image: { base64: makePng(8, 8).toString('base64'), filename: 'feature.png' },
       feature_image_alt: 'Pink square feature image',
       meta_title: 'How Claude publishes to Ghost safely',
@@ -268,7 +268,7 @@ test('create_draft: markdown with inline + repo + base64 images, code, SEO and F
   assert.equal(p.feature_image_alt, 'Pink square feature image');
   assert.equal(p.meta_description.length > 70, true);
   assert.equal(p.og_title, 'Claude to Ghost, safely');
-  assert.deepEqual(p.tags.map((t: any) => t.name).sort(), ['AI', 'Ghost']);
+  assert.deepEqual(p.tags.map((t: any) => t.name).sort(), ['AI', 'AI Engineering', 'Ghost']);
   const lex = JSON.parse(p.lexical).root.children;
   const images = lex.filter((n: any) => n.type === 'image');
   assert.equal(images.length, 2);

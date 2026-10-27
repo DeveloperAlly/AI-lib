@@ -152,7 +152,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
     {
       title: 'Create draft post',
       description:
-        'Create a NEW post as a DRAFT (never published). Write the body in Markdown; inline images (![alt](url "caption")) and the feature image are uploaded to Ghost automatically. Fill the SEO fields (meta_title <= 60 chars, meta_description 70-160 chars, excerpt, feature_image_alt) and, for answer-engine optimisation, open with a direct answer and add an faq list. Returns preview and editor links plus an SEO/AEO check. Show the owner the preview link and wait for explicit approval before calling publish_post.',
+        'Create a NEW post as a DRAFT (never published). Write the body in Markdown; inline images (![alt](url "caption")) and the feature image are uploaded to Ghost automatically. Tags: the FIRST tag must be one main category (AI Engineering, Tutorials, OpEds, Project Case Studies), followed by 2-4 search tags. Fill excerpt (<= 300), meta_title (<= 60) and meta_description (70-145) for Google, twitter_title (<= 70) and twitter_description (<= 200) for X, og_title/og_description (same limits) for LinkedIn/Facebook. For answer engines, open with a direct answer and put reader questions in the faq list (H2s are concept names, not questions). Returns preview and editor links plus an SEO/AEO check. Show the owner the preview link and wait for explicit approval before calling publish_post.',
       inputSchema: { ...postFieldsShape, cover: coverSchema },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },

@@ -45,9 +45,26 @@ test('SEO audit flags the important problems and passes a good post', () => {
   const codes = bad.map((f) => f.code);
   for (const c of ['BODY_H1', 'HEADING_SKIP', 'IMAGE_ALT_MISSING', 'FEATURE_IMAGE_ALT_MISSING', 'META_DESCRIPTION_MISSING', 'BODY_THIN'])
     assert.ok(codes.includes(c), `expected ${c}`);
-  const body = `<p>${'Direct answer words here. '.repeat(8)}</p><h2>What is it?</h2><p>${'word '.repeat(400)}<a href="https://src">source</a></p><pre><code class="language-js">x</code></pre><figure><img src="i.png" alt="ok"></figure>`;
-  const good = auditPost({ title: 'A good descriptive title for testing', slug: 'good-post', html: body, custom_excerpt: 'e', meta_description: 'd'.repeat(120), feature_image: 'f.png', feature_image_alt: 'alt', tags: [{}] });
+  const body = `<p>${'Direct answer words here. '.repeat(8)}</p><h2>Crash Recovery</h2><p>${'word '.repeat(400)}<a href="https://src">source</a></p><pre><code class="language-js">x</code></pre><figure><img src="i.png" alt="ok"></figure>`;
+  const good = auditPost({
+    title: 'A good descriptive title for testing', slug: 'good-post', html: body, custom_excerpt: 'e', meta_description: 'd'.repeat(120),
+    feature_image: 'f.png', feature_image_alt: 'alt', tags: [{ name: 'AI Engineering' }, { name: 'LangGraph' }, { name: 'Agents' }],
+    twitter_title: 'x'.repeat(70), twitter_description: 'x'.repeat(200), og_title: 'o', og_description: 'o',
+  });
   assert.deepEqual(good.filter((f) => f.severity !== 'info'), []);
+});
+
+test('SEO audit: first tag must be a main category; platform fields respect their limits', () => {
+  const codes = (p: Parameters<typeof auditPost>[0]) => auditPost({ title: 'T'.repeat(30), html: '<p>x</p>', ...p }).map((f) => `${f.severity}:${f.code}`);
+  assert.ok(codes({ tags: ['LangGraph', 'AI Engineering'] }).includes('error:PRIMARY_TAG_MISSING'), 'main tag not first');
+  assert.ok(codes({ tags: [] }).includes('error:PRIMARY_TAG_MISSING'));
+  assert.ok(!codes({ tags: ['tutorials', 'n8n', 'Agents'] }).some((c) => c.includes('PRIMARY_TAG')), 'case-insensitive');
+  assert.ok(codes({ tags: ['OpEds', 'Tutorials'] }).includes('warn:MAIN_TAG_MULTIPLE'));
+  assert.ok(codes({ tags: ['OpEds'] }).includes('info:SEARCH_TAGS_COUNT'));
+  const c = codes({ twitter_title: 'x'.repeat(71), twitter_description: 'x'.repeat(201), og_title: 'x'.repeat(71), meta_description: 'x'.repeat(146) });
+  for (const k of ['TWITTER_TITLE_LONG', 'TWITTER_DESCRIPTION_LONG', 'OG_TITLE_LONG', 'META_DESCRIPTION_LONG', 'OG_DESCRIPTION_MISSING', 'EXCERPT_MISSING'])
+    assert.ok(c.includes(`warn:${k}`), k);
+  assert.ok(auditPost({ title: 'T', html: '<h2>What is it?</h2><p>x</p>', tags: ['OpEds'] }).some((f) => f.code === 'H2_QUESTION'));
 });
 
 test('repo paths cannot escape the repo root', () => {
