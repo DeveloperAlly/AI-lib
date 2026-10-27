@@ -1,131 +1,107 @@
 ---
 name: ghost-blog-posting
-description: Post an article to the Ghost blog via the Ghost Blogs connector: images placed in the text, branded cover generated, code blocks tidied, full SEO/AEO, saved as a draft or published.
+description: Publish an article to Ally's Ghost blog (blog.alisonhaire.com) through the Ghost Blogs connector - runs naming, slop review, images, cover and post settings in order, then creates the draft, verifies the preview and publishes on approval. Use for any new post or any update to an existing post.
 ---
 
 # Ghost blog posting
 
-Turns an article (Markdown file, pasted text, or a draft written in chat) plus its images into a correct Ghost post using the **Ghost Blogs** connector (`check_connection`, `list_posts`, `get_post`, `upload_image`, `create_draft`, `update_draft`, `preview_cover`, `apply_cover`, `seo_check`, `publish_post`, `unpublish_post`).
+The orchestrator. It owns the order of the steps and the Ghost mechanics; each step's rules live in its own skill, loaded when the step runs. To write a post from scratch, use `blog-harness` first, then come here to publish.
 
-The author's words are hers. This skill fixes structure and metadata; it does not rewrite prose. Any wording change beyond the mechanical fixes listed below needs her OK first.
+The author's words are hers. Nothing here rewrites prose without her OK, except the Ghost formatting fixes in step 5, which are reported.
 
-## 1. Start: connection, duplicates, draft or publish
+Connector tools: `check_connection`, `list_posts`, `get_post`, `upload_image`, `create_draft`, `update_draft`, `preview_cover`, `apply_cover`, `seo_check`, `publish_post`, `unpublish_post`.
 
-1. Call `check_connection`. If it fails, stop and tell the user the connector is not reachable (enable it from the + menu, or reconnect it in Settings > Connectors).
-   - Also check that `preview_cover` and `apply_cover` are in your tool list. If they're missing, the chat is holding an old copy of the connector's tools: say so and suggest starting a new chat. Don't fake a cover with another image.
-2. Call `list_posts` with `search` set to a distinctive part of the title. If a post with that title already exists, ask whether to update it (`update_draft`) or create a new one. Never create a silent duplicate.
-3. Ask **one** question, unless the user already said which: **"Save as a draft, or publish it?"** Offer: *Draft (I'll send you the preview)* and *Publish once checks pass*. Default to draft if there is no answer.
+## 0. Start
 
-## 2. Images: get every image into the text
+1. Call `check_connection`. If it fails, stop and tell Ally the connector is not reachable (enable it from the + menu, or reconnect it in Settings > Connectors). If `preview_cover` and `apply_cover` are missing, the chat holds an old copy of the tool list: say so and suggest a new chat.
+2. Call `list_posts` with `search` set to a distinctive part of the title. If the post exists, ask whether to update it or create a new one. Never create a silent duplicate.
+3. Ask one question, unless she already said: **"Save as a draft, or publish it?"** Offer *Draft (I'll send you the preview)* and *Publish once checks pass*. Default to draft if there is no answer.
 
-**Inventory.** List every image the user supplied (attachments, zips, URLs) and every image reference in the text (`![alt](path)`, `<img>`). Unzip archives. Check each file's real type and pixel size (`file img.png`).
+## Before posting
 
-**Match references to files.**
-- Match by filename stem, ignoring folder and extension. For example, `diagrams/01-mental-model.svg` in the text matches `01-mental-model.png` in the zip.
-- If a reference has no matching file, or a file has no reference, look at the image and the surrounding text. Place it directly after the paragraph it illustrates.
-- If the right spot is genuinely unclear, ask. Never drop an image silently, and never leave a reference pointing at a file that won't upload.
+### 1. Names: `naming`
 
-**Formats.** The server accepts JPEG, PNG, GIF and WebP up to 10 MB. It refuses SVG on purpose, because SVG can carry script. Convert SVGs to PNG at about 1600px wide:
+Run the blog post title profile for the title, and the blog section heading profile for every H2 and H3. Show the compact output (current name, top three, winner) and apply only the names she approves. Remove a leading `# Title` line from the body, because Ghost renders the title as the H1.
 
-```bash
-pip install cairosvg
-python3 -c "import cairosvg; cairosvg.svg2png(url='in.svg', write_to='out.png', output_width=1600)"
-```
+### 2. Prose review: `no-ai-slop`
 
-**Alt text and captions.**
-- Every image needs real alt text that describes what the image shows. A file name is not alt text. Keep the author's alt text if she wrote some.
-- Captions are optional and use Markdown title syntax: `![alt](src "caption")`.
-- An image must be alone in its own paragraph. That is what makes Ghost create a native image card.
+Run it in detection mode on the body. Report findings with proposed fixes and apply only the fixes she accepts. If the post came through `blog-harness`, its mechanical scan must also be clean.
 
-**Getting the bytes to Ghost.** The connector runs on a server, so it cannot read files from this chat. It needs one of these, in order of preference:
-1. **An existing public https URL.** Use it as-is. The server downloads the image and re-hosts it on Ghost.
-2. **The GitHub content repo**, if `check_connection` shows `github_mirror` set. Commit the images there and reference them by repo path (`repo_path`, or a relative path in the Markdown).
-3. **A temporary public staging location the user owns**, such as a throwaway branch of a public repo. Use `https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>` URLs.
-   - Tell the user before pushing anything, and say where it is.
-   - Use the repo name exactly as GitHub reports it now. A renamed repo's old name gives a 404 on raw URLs.
-   - Delete the staging location after the post is created. If you cannot delete it, tell the user it is safe to delete, because Ghost keeps its own copies.
-4. **Base64.** Only for small images (under about 150 KB each), since the bytes travel through the conversation.
+### 3. Images: `post-images`
 
-**Feature image: the branded cover (default).**
-- Leave `feature_image` out. The server then generates the branded cover: Alison Haire design system, a topic illustration, and the LinkedIn and X handles. This keeps every cover on the blog consistent. Its alt text is set automatically.
-- Set the eyebrow through tags. Include one kind tag (Essay, Playbook, Field guide, Field notes, Tutorial, Analysis, Research, Op-ed, Interview); the next tag becomes the topic.
-- Pass `cover: { subtitle, kind, topic, title, motif }` when the defaults aren't right:
-  - `title`: use a shorter cover title when the post title is long. "Title. Rest" and "Title: Rest" split into title and subtitle automatically.
-  - `subtitle`: one line of at most about 60 characters, in the author's voice and taken from the post.
-- Before creating the post, call `preview_cover` with the title and tags, and show her the image so she can approve or adjust it.
-- Use a different `feature_image` only if she supplies one or asks for it. Never replace a cover she chose; `apply_cover` needs `replace_custom: true` for that, and only on her say-so.
-- Diagrams from the post stay inline. Don't promote one to feature image unless she asks.
-- **Existing posts:** `apply_cover` (with `expected_revision`) generates the cover and saves its settings, so later title edits in Ghost keep them.
-  - A published post also needs `user_approved: true`.
-  - Replacing an image she chose also needs `replace_custom: true`, and only when she asked for it.
-  - Show her `preview_cover` first.
-- **What happens without you:** posts she creates or retitles directly in Ghost get or refresh their generated cover automatically, about 2 minutes after the last edit. You don't need to do anything for those.
+Place every image, write alt text, convert SVGs, and get the bytes to a source the server can fetch.
 
-## 3. Mechanical fixes to the text (allowed without asking; report each one)
+### 4. Cover: `post-cover`
 
-- **Title.** Remove a leading `# Title` line, because Ghost renders the post title as the H1. The body starts at H2. Do not skip heading levels: H2 then H3, never H2 then H4.
-- **Code blocks.**
-  - Every fenced block gets a language tag (`bash`, `python`, `ts`, `json`, `yaml`, …). Use `text` for program output, logs and terminal transcripts.
-  - Never change the code itself.
-  - Scan code and commands for anything that looks like a real secret: API keys, tokens, passwords, private URLs with credentials. Placeholders like `sk-or-...` are fine. If you find a real-looking secret, stop and ask before posting.
-- **Tables.** Leave Markdown tables as they are; they become HTML cards in Ghost.
-- **Embeds.** This is what Ghost does with them, tested on Ghost 6.72:
-  - **YouTube:** use the provider's `<iframe>` embed code, on its own line. It becomes a native embed card. A bare YouTube link only shows as a text link.
-  - **X:** a pasted X embed (`blockquote.twitter-tweet` plus its script) does **not** survive, because Ghost turns it into a plain quote. Tell her, and either link to the post or ask whether to drop it.
-  - **Anything else:** wrap it in `<!--kg-card-begin: html-->` … `<!--kg-card-end: html-->` to keep it as raw HTML, and tell her it only shows if the provider's code runs on the page.
-- **Links.** Keep them. If a link is obviously broken (a relative path to a file that only exists locally), tell the user rather than guessing a replacement.
-- **Local-only references.** Mentions of files or repos the reader cannot reach are the author's call. Flag them, don't remove them.
+After the names are final. Choose kind, topic, subtitle and motif, run `preview_cover`, and show it.
 
-## 4. SEO and AEO
+### 5. Ghost formatting (allowed without asking; report each one)
 
-Fill all of these in `create_draft`:
+Verified on blog.alisonhaire.com (Ghost 6.44 to 6.72).
 
-| Field | Rule |
+| Item | Rule |
 |---|---|
-| `slug` | Short, lowercase, hyphenated, keyword-led; drop stop words. Aim for under 60 characters. |
-| `meta_title` | 60 characters or fewer, with the main keyword near the start. It may differ from the on-page title. |
-| `meta_description` | 70–160 characters. Answers "what will I get from this post?" Count the characters; don't estimate. |
-| `excerpt` | One or two sentences, 300 characters or fewer, in the author's voice. Shown on cards. |
-| `og_title` / `og_description`, `twitter_title` / `twitter_description` | Social versions, which can be a little punchier. They fall back to the meta fields if omitted. |
-| `tags` | 3–5 tags. Reuse the blog's existing tag names where possible (check other posts with `get_post`) so archives don't fragment. |
-| `canonical_url` | Only if the post was first published somewhere else. |
-| `faq` | For answer engines: 3–6 questions readers would actually search for. Each answer must come from what the post says, with nothing invented or outside it. These render as a visible FAQ section plus FAQPage structured data. Tell the user you wrote them so she can check the voice. |
+| Headings | H2 and below in the body; no skipped levels (H2 then H3, never H2 then H4). |
+| Code blocks | Every fenced block gets a language (`bash`, `python`, `ts`, `json`, `yaml`; `text` for output, logs and transcripts). Never change the code itself. |
+| Secrets | Scan code and commands for real-looking keys, tokens, passwords or credentialed URLs. Placeholders like `sk-or-...` are fine. Stop and ask on anything real. |
+| Tables | Markdown tables become HTML cards. The content column is 594px and the theme scrolls wide tables: 5 short columns rendered 872px (tolerable), and 3 columns with one prose column rendered 2266px (unusable). Any table whose cells carry a sentence becomes a definition list, one paragraph per row: `**Term** does X. Evidence sentence.` |
+| Footnotes | Not supported. Use inline links. |
+| Embeds | YouTube: the provider's `<iframe>` on its own line becomes a native embed card; a bare link stays a text link. X: a pasted X embed is turned into a plain quote and does not render, so link to the post instead or ask. Anything else: wrap it in `<!--kg-card-begin: html-->` ... `<!--kg-card-end: html-->`, and note it only shows if the provider's script runs. `prove-it-tutorial` section 6 covers embeds in that mode. |
+| Links | Keep them. Flag ones that are obviously broken, such as relative paths to local files, rather than guessing a replacement. |
 
-AEO advice (suggest these, don't impose them):
-- An opening paragraph of 40–60 words that directly answers the post's core question.
-- Question-style H2s where they fit naturally.
+## While posting
 
-## 5. Create, then verify for real
+### 6. Settings: `post-settings`
 
-1. Call `create_draft`. It always creates a draft, whatever the user chose.
-2. Read the result:
-   - `images_uploaded` should equal the number of distinct images.
-   - The SEO/AEO findings should contain no `error` items.
-   - If anything is wrong, fix it with `update_draft`, passing the `expected_revision` from the latest result.
-3. Fetch the `preview_url` and check the rendered page:
-   - Every image is present and served from the blog's own `/content/images/` path.
-   - No image is missing alt text.
-   - The tables and code blocks are there.
-   - The FAQ section exists, if one was added.
-   - No URLs point at the staging location any more.
-   - The feature image is the generated cover, ending in `ah-cover-<hash>.jpg`, unless she supplied her own.
-4. Run `seo_check` if you changed anything after creating the post.
+Main category tag first, plus search tags, slug, excerpt, Google, X and LinkedIn fields, and FAQ.
 
-## 6. Finish
+### 7. Create
 
-- **Draft.** Send the preview link and the editor link. Summarise:
-  - where each image went
-  - every SEO field you set
-  - the FAQ you wrote
-  - each mechanical fix
-  - the remaining findings, and whether they are worth acting on
-- **Publish.** Only if the user chose publish and there are no `error` findings, call `publish_post` with `user_approved: true` and the latest `revision`. Then fetch the live URL and confirm it returns 200, shows the images, has the meta description in the page head, and that its `og:image` is the cover. Publishing never emails subscribers; say so in the report.
-- If publishing is blocked (error findings, or something needing her decision), leave it as a draft and explain why.
-- Clean up any temporary image staging (section 2).
+Call `create_draft` with the Markdown body, the approved title, the `post-settings` fields and `cover: {...}`, and no `feature_image`. It always creates a draft, whatever she chose. For an existing post, use `update_draft` with the latest `expected_revision`; a published post needs `user_approved: true` for each change she approved.
+
+### 8. Verify for real
+
+1. Read the result:
+   - `images_uploaded` equals the number of distinct images;
+   - the cover was created;
+   - `seo_check` shows no errors, and every warning is either fixed or explained to her.
+2. Fetch the `preview_url` and check the rendered page. The live theme decides; the Ghost editor can look right while the site does not. A table once rendered white on white on the live site.
+   - Every image is present, served from `/content/images/`, with alt text.
+   - Tables fit, and code blocks have their languages.
+   - The FAQ section is present.
+   - Nothing points at a staging location.
+3. Fix with `update_draft`, then run `seo_check` again.
+
+## 9. Finish
+
+- **Draft.** Send the preview and editor links. Summarise:
+  - the names chosen;
+  - prose fixes applied;
+  - where each image went;
+  - the cover settings;
+  - every settings field;
+  - the FAQ;
+  - the formatting fixes;
+  - remaining findings, and whether they are worth acting on.
+- **Publish**, only if she chose publish and there are no `error` findings: call `publish_post` with `user_approved: true` and the latest `revision`. Fetch the live URL and confirm:
+  - it returns 200;
+  - the images show;
+  - the meta description is in the page head;
+  - `og:image` is the cover.
+
+  Publishing never emails subscribers; say so.
+- If publishing is blocked, leave it as a draft and say why.
+- Clean up any image staging.
+
+## Known theme defects
+
+- Table header contrast: fixed 13 Sep 2026 by site-header code injection (`.gh-content table th { background: transparent !important; color: inherit !important; border-bottom: 1px solid rgba(128,128,128,.45) !important; }`).
+- Table width: open. The breakout fix (`grid-column: wide-start / wide-end`) widens tables to 931px but pushes headings into the sidebar gutter. This needs theme work, not code injection.
 
 ## Don'ts
 
-- Don't publish without the user having chosen to publish in this conversation.
-- Don't rewrite the author's prose, headline or intro without asking.
+- Don't publish without her choosing to publish in this conversation.
+- Don't rewrite her prose, headline or intro without asking.
 - Don't upload SVGs, invent FAQ facts, or leave images without alt text.
-- Don't paste API keys or passphrases into chat. The connector authenticates on its own.
+- Don't delete posts. Retitle a post as superseded and let her delete it.
+- Don't paste API keys or passphrases into chat; the connector authenticates on its own.
